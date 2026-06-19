@@ -990,19 +990,19 @@ only when it satisfies every filter (AND).")
      torrents)))
 
 (defun rtorred--apply-tags ()
-  "Redraw the mark/flag tag in the padding column of every visible row.
-A no-op when nothing is marked or flagged -- `tabulated-list-print'
-already leaves the padding blank, so the common case costs nothing."
-  (when (or rtorred--marks rtorred--flags)
-    (save-excursion
-      (goto-char (point-min))
-      (while (not (eobp))
-        (let ((id (tabulated-list-get-id)))
-          (tabulated-list-put-tag
-           (cond ((and id (member id rtorred--flags)) "D")
-                 ((and id (member id rtorred--marks)) "*")
-                 (t " "))
-           t))))))
+  "Set the mark/flag tag in the padding column of every visible row.
+Always does a full pass, so it clears stale tags too (e.g. after
+`rtorred-unmark-all').  Callers on the hot refresh path should skip it
+when nothing is marked, since a fresh print already leaves padding blank."
+  (save-excursion
+    (goto-char (point-min))
+    (while (not (eobp))
+      (let ((id (tabulated-list-get-id)))
+        (tabulated-list-put-tag
+         (cond ((and id (member id rtorred--flags)) "D")
+               ((and id (member id rtorred--marks)) "*")
+               (t " "))
+         t)))))
 
 (defun rtorred--torrent-num (hash field)
   "Return numeric FIELD of the torrent with HASH, defaulting to 0.
@@ -1087,12 +1087,30 @@ column when the requested one is absent or unsortable."
                            (funcall (plist-get (cdr col) :format) tr))
                          cols))))
 
+(defun rtorred--row-position (id)
+  "Return the buffer position of the start of the row for ID, or nil."
+  (save-excursion
+    (goto-char (point-min))
+    (let (found)
+      (while (and (not found) (not (eobp)))
+        (if (equal (tabulated-list-get-id) id)
+            (setq found (point))
+          (forward-line 1)))
+      found)))
+
 (defun rtorred--render (torrents cols)
   "Populate the current buffer from TORRENTS using column defs COLS.
 Re-prints the list, preserving point (by torrent), the sort order, and
 the marks/flags (pruned to torrents that still exist)."
-  (let ((gc-cons-threshold (max gc-cons-threshold (* 256 1024 1024)))
-        (visible (rtorred--visible-torrents torrents)))
+  (let* ((gc-cons-threshold (max gc-cons-threshold (* 256 1024 1024)))
+         (visible (rtorred--visible-torrents torrents))
+         ;; Remember which torrent sits at the top of the window so we can
+         ;; pin it back there after the reprint -- otherwise erasing the
+         ;; buffer resets the scroll and redisplay recenters on point.
+         (win (get-buffer-window (current-buffer)))
+         (top-id (and win (save-excursion
+                            (goto-char (window-start win))
+                            (tabulated-list-get-id)))))
     ;; Only visible torrents are stored, so marks, sorting, actions and the
     ;; detail view all operate on the filtered set -- hidden rows cannot be
     ;; acted on.
@@ -1104,7 +1122,13 @@ the marks/flags (pruned to torrents that still exist)."
     (setq tabulated-list-entries
           (mapcar (lambda (tr) (rtorred--entry tr cols)) visible))
     (tabulated-list-print t)
-    (rtorred--apply-tags)))
+    ;; A fresh print blanks the padding, so only re-tag when something is
+    ;; marked (saves an O(n) pass on the common no-marks refresh).
+    (when (or rtorred--marks rtorred--flags)
+      (rtorred--apply-tags))
+    (when (and win (window-live-p win) top-id)
+      (let ((pos (rtorred--row-position top-id)))
+        (when pos (set-window-start win pos t))))))
 
 (defun rtorred--refresh ()
   "Refetch synchronously and re-render the current buffer."
