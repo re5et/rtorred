@@ -120,6 +120,21 @@ list to taste -- adding a brand-new column means defining it in
 `rtorred--all-columns' and adding its key here."
   :type '(repeat symbol))
 
+(defcustom rtorred-default-sort '(name . ascending)
+  "Initial sort for new rtorred buffers.
+
+Either nil (leave the list in rtorrent's own view order), or a cons
+\(COLUMN-KEY . DIRECTION) where COLUMN-KEY is one of the keys in
+`rtorred-columns' and DIRECTION is `ascending' or `descending'.  If the
+chosen column is not shown or not sortable, the first sortable column is
+used.  Takes effect for buffers opened afterwards (reopen with
+\\[rtorred] to apply)."
+  :type '(choice (const :tag "rtorrent view order" nil)
+                 (cons :tag "Column and direction"
+                       (symbol :tag "Column key")
+                       (choice (const :tag "Ascending" ascending)
+                               (const :tag "Descending" descending)))))
+
 (defcustom rtorred-added-time-method "d.load_date"
   "RPC method providing a download's \"added\" time, as a Unix epoch.
 
@@ -939,9 +954,20 @@ Coerces string epoch/values (e.g. from custom fields) to numbers."
            cols)))
 
 (defun rtorred--default-sort-key (cols)
-  "Return an initial `tabulated-list-sort-key' for column defs COLS."
-  (let ((col (seq-find #'rtorred--sort-spec cols)))
-    (and col (cons (plist-get (cdr col) :label) nil))))
+  "Return an initial `tabulated-list-sort-key' for column defs COLS.
+Honours `rtorred-default-sort', falling back to the first sortable
+column when the requested one is absent or unsortable."
+  (cl-flet ((first-sortable ()
+              (let ((col (seq-find #'rtorred--sort-spec cols)))
+                (and col (cons (plist-get (cdr col) :label) nil)))))
+    (pcase rtorred-default-sort
+      ('nil nil)
+      (`(,key . ,dir)
+       (let ((col (assq key cols)))
+         (if (and col (rtorred--sort-spec col))
+             (cons (plist-get (cdr col) :label) (eq dir 'descending))
+           (first-sortable))))
+      (_ (first-sortable)))))
 
 (defun rtorred--entry (tr cols)
   "Build a `tabulated-list-entries' element for torrent TR over COLS."
