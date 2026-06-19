@@ -172,6 +172,13 @@ only manual refresh via \\[revert-buffer].  Toggle per-buffer with
 `rtorred-toggle-auto-refresh'."
   :type '(choice (const :tag "Disabled" nil) (number :tag "Seconds")))
 
+(defcustom rtorred-render-idle-delay 0.2
+  "Idle delay, in seconds, before redrawing after an async refresh.
+Redrawing a large list is the costliest synchronous step of a refresh;
+waiting for this much idle time keeps that redraw from interrupting
+typing.  nil redraws immediately (no deferral)."
+  :type '(choice (const :tag "Immediate" nil) (number :tag "Seconds")))
+
 ;;;; Faces
 
 (defgroup rtorred-faces nil
@@ -1112,6 +1119,12 @@ the marks/flags (pruned to torrents that still exist)."
 (defvar-local rtorred--refreshing nil
   "Non-nil while an async refresh is in flight for this buffer.")
 
+(defvar-local rtorred--render-timer nil
+  "Idle timer for a deferred re-render, or nil.")
+
+(defvar-local rtorred--pending-render nil
+  "Latest (TORRENTS . COLS) awaiting a deferred render, or nil.")
+
 (defun rtorred--mode-line ()
   "Update the rtorred mode-line indicator for refresh/auto state."
   (setq mode-line-process
@@ -1140,7 +1153,7 @@ Skips out if a refresh is already in flight for this buffer."
          (when (buffer-live-p buf)
            (with-current-buffer buf
              (setq rtorred--refreshing nil)
-             (rtorred--render torrents cols)
+             (rtorred--schedule-render torrents cols)
              (rtorred--mode-line))))
        (lambda (msg)
          (when (buffer-live-p buf)
@@ -1153,6 +1166,30 @@ Skips out if a refresh is already in flight for this buffer."
   "Refresh the rtorred buffer (the `revert-buffer-function')."
   (rtorred--refresh-async))
 
+(defun rtorred--render-pending (buf)
+  "Render the data most recently queued for BUF (see `rtorred--schedule-render')."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (setq rtorred--render-timer nil)
+      (when rtorred--pending-render
+        (let ((data rtorred--pending-render))
+          (setq rtorred--pending-render nil)
+          (rtorred--render (car data) (cdr data)))))))
+
+(defun rtorred--schedule-render (torrents cols)
+  "Render TORRENTS for COLS, deferred to a brief idle.
+The redraw of a large list is the costliest synchronous step; deferring
+it via `rtorred-render-idle-delay' lets it land in a pause rather than
+interrupting typing.  Only the most recent data is rendered.  With a nil
+delay it renders immediately."
+  (if (null rtorred-render-idle-delay)
+      (rtorred--render torrents cols)
+    (setq rtorred--pending-render (cons torrents cols))
+    (unless (timerp rtorred--render-timer)
+      (setq rtorred--render-timer
+            (run-with-idle-timer rtorred-render-idle-delay nil
+                                 #'rtorred--render-pending (current-buffer))))))
+
 (defun rtorred--timer-tick (buf)
   "Fire an async refresh in BUF if it is alive, visible, and idle.
 Skips refreshing a buffer that is not displayed (no point fetching and
@@ -1164,10 +1201,13 @@ re-rendering ~1000 rows nobody is looking at)."
         (rtorred--refresh-async)))))
 
 (defun rtorred--stop-timer ()
-  "Cancel this buffer's auto-refresh timer, if any."
+  "Cancel this buffer's auto-refresh and deferred-render timers, if any."
   (when rtorred--refresh-timer
     (cancel-timer rtorred--refresh-timer)
-    (setq rtorred--refresh-timer nil)))
+    (setq rtorred--refresh-timer nil))
+  (when rtorred--render-timer
+    (cancel-timer rtorred--render-timer)
+    (setq rtorred--render-timer nil)))
 
 (defun rtorred--start-timer ()
   "Start this buffer's auto-refresh timer per `rtorred-auto-refresh-interval'."
