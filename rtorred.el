@@ -51,6 +51,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'color)
 (require 'xml)
 (require 'url)
 (require 'url-parse)
@@ -185,6 +186,25 @@ only manual refresh via \\[revert-buffer].  Toggle per-buffer with
 
 (defface rtorred-errored '((t :inherit error))
   "Face for the status of torrents with an error message.")
+
+(defcustom rtorred-percent-gradient t
+  "Whether to color the Done column by a red-to-green completion gradient.
+When non-nil, a torrent's percentage is shown in a colour interpolated
+from red (0%) through yellow to green (100%)."
+  :type 'boolean
+  :group 'rtorred-faces)
+
+(defcustom rtorred-ratio-gradient t
+  "Whether to color the Ratio column by a red-to-green gradient.
+Red at 0, yellow at break-even (1.0), green at `rtorred-ratio-good'."
+  :type 'boolean
+  :group 'rtorred-faces)
+
+(defcustom rtorred-ratio-good 2.0
+  "Share ratio that the Ratio gradient colours fully green.
+Ratios at or above this are green; 1.0 is yellow; 0 is red."
+  :type 'number
+  :group 'rtorred-faces)
 
 ;;;; Transport layer
 ;;
@@ -718,17 +738,38 @@ needs a working `rtorred-rpc-url'.  Synchronous (it blocks briefly)."
   "Render the directory of torrent TR."
   (or (rtorred--field tr 'directory) ""))
 
+(defun rtorred--gradient-color (frac)
+  "Return a hex foreground colour for FRAC in 0..1.
+Interpolates red (0) through yellow to green (1) in HSL, with lightness
+adapted to the frame's light/dark background for legibility."
+  (let* ((f (max 0.0 (min 1.0 frac)))
+         (hue (/ (* f 120.0) 360.0))
+         (light (if (eq (frame-parameter nil 'background-mode) 'light) 0.40 0.62))
+         (rgb (color-hsl-to-rgb hue 0.6 light)))
+    (apply #'color-rgb-to-hex (append rgb '(2)))))
+
 (defun rtorred--fmt-percent (tr)
   "Render the completion percentage of torrent TR."
   (let ((size (rtorred--field tr 'size))
         (done (rtorred--field tr 'done)))
     (if (and (numberp size) (> size 0) (numberp done))
-        (format "%d%%" (/ (* 100 done) size))
+        (let* ((pct (/ (* 100 done) size))
+               (str (format "%d%%" pct)))
+          (if rtorred-percent-gradient
+              (propertize str 'face
+                          (list :foreground (rtorred--gradient-color (/ pct 100.0))))
+            str))
       "")))
 
 (defun rtorred--fmt-ratio (tr)
   "Render the share ratio of torrent TR (rtorrent stores it per-mille)."
-  (format "%.2f" (/ (or (rtorred--field tr 'ratio) 0) 1000.0)))
+  (let* ((ratio (/ (or (rtorred--field tr 'ratio) 0) 1000.0))
+         (str (format "%.2f" ratio)))
+    (if (and rtorred-ratio-gradient (> rtorred-ratio-good 0))
+        (propertize str 'face
+                    (list :foreground
+                          (rtorred--gradient-color (/ ratio rtorred-ratio-good))))
+      str)))
 
 (defun rtorred--fmt-priority (tr)
   "Render the priority of torrent TR."

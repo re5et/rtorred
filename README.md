@@ -120,6 +120,17 @@ chosen values in your init if you like, or just run the command on startup.
 (setq rtorred-default-sort '(added . descending))   ; newest first
 ```
 
+### Colors
+
+```elisp
+;; Done % and Ratio get a red -> yellow -> green gradient
+(setq rtorred-percent-gradient t)
+(setq rtorred-ratio-gradient t
+      rtorred-ratio-good 2.0)   ; ratio coloured fully green
+```
+
+Status cells use the customizable faces in the `rtorred-faces` group.
+
 ### Auto-refresh
 
 ```elisp
