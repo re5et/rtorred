@@ -184,7 +184,7 @@ Refreshing is non-blocking and pauses while a minibuffer command (e.g. a
 | `+` / `-` | raise / lower priority |
 | `d` / `x` | flag for erase / execute flagged erases |
 | `D` | erase marked-or-current now |
-| `a` / `A` | add torrent file / magnet or URL (prefix arg = don't start) |
+| `a` / `A` | add torrent file (or all `.torrent` in a directory) / magnet or URL (prefix arg = don't start) |
 | `RET` / `i` | detail view (files, trackers, peers) |
 | `S` | sort (completes a column when point isn't on one) |
 | `g` / `G` | refresh / toggle auto-refresh |

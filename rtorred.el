@@ -1930,22 +1930,57 @@ START non-nil chooses the start-on-load variant.  Prefers the dotted
        (rtorred--after-action buf))
      (lambda (msg) (message "rtorred: add failed: %s" msg)))))
 
+(defun rtorred--read-torrent-data (file)
+  "Return the raw bytes of FILE as a unibyte string."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally file)
+    (buffer-string)))
+
+(defun rtorred--add-directory (dir no-start)
+  "Add every .torrent file in DIR to rtorrent (after confirmation).
+Reports how many were added and refreshes once at the end; files that
+fail to load are named but do not abort the rest."
+  (let ((files (directory-files dir t "\\.torrent\\'"))
+        (method (rtorred--load-method 'raw (not no-start)))
+        (buf (current-buffer)))
+    (cond
+     ((null files) (message "rtorred: no .torrent files in %s" dir))
+     ((yes-or-no-p (format "Add %d .torrent file%s from %s? "
+                           (length files) (if (= (length files) 1) "" "s")
+                           (abbreviate-file-name dir)))
+      (rtorred--run-batch
+       (mapcar
+        (lambda (f)
+          (lambda (k)
+            (rtorred-rpc-async
+             method (list "" (cons :base64 (rtorred--read-torrent-data f)))
+             (lambda (_) (funcall k))
+             (lambda (msg)
+               (message "rtorred: %s: %s" (file-name-nondirectory f) msg)
+               (funcall k f)))))
+        files)
+       (lambda (failures)
+         (message "rtorred: added %d of %d .torrent file(s)%s"
+                  (- (length files) (length failures)) (length files)
+                  (if failures (format " (%d failed)" (length failures)) ""))
+         (rtorred--after-action buf)))))))
+
 (defun rtorred-add-torrent-file (file &optional no-start)
   "Add the torrent in FILE to rtorrent, sending its contents.
-With a prefix argument (NO-START), add it without starting it.
-FILE is read on the local machine and uploaded as base64, so this works
-even when rtorrent is remote."
+If FILE is a directory, add every .torrent file in it instead.  With a
+prefix argument (NO-START), add without starting.  FILE is read on the
+local machine and uploaded as base64, so this works even when rtorrent
+is remote."
   (interactive
-   (list (read-file-name "Add torrent file: " nil nil t nil
+   (list (read-file-name "Add torrent file or directory: " nil nil t nil
                          (lambda (n) (or (file-directory-p n)
                                          (string-suffix-p ".torrent" n))))
          current-prefix-arg))
-  (let ((data (with-temp-buffer
-                (set-buffer-multibyte nil)
-                (insert-file-contents-literally file)
-                (buffer-string))))
+  (if (file-directory-p file)
+      (rtorred--add-directory file no-start)
     (rtorred--add (rtorred--load-method 'raw (not no-start))
-                  (cons :base64 data)
+                  (cons :base64 (rtorred--read-torrent-data file))
                   (file-name-nondirectory file))))
 
 (defun rtorred-add-magnet (uri &optional no-start)
