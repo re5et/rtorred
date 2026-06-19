@@ -1191,14 +1191,22 @@ Skips out if a refresh is already in flight for this buffer."
   (rtorred--refresh-async))
 
 (defun rtorred--render-pending (buf)
-  "Render the data most recently queued for BUF (see `rtorred--schedule-render')."
+  "Render the data most recently queued for BUF (see `rtorred--schedule-render').
+While a minibuffer is active (e.g. a `consult-line' search reading from
+this buffer), the redraw is postponed -- reprinting underneath the
+search would scramble its positions and jump the view."
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (setq rtorred--render-timer nil)
-      (when rtorred--pending-render
-        (let ((data rtorred--pending-render))
-          (setq rtorred--pending-render nil)
-          (rtorred--render (car data) (cdr data)))))))
+      (cond
+       ((null rtorred--pending-render))
+       ((active-minibuffer-window)
+        (setq rtorred--render-timer
+              (run-with-idle-timer rtorred-render-idle-delay nil
+                                   #'rtorred--render-pending buf)))
+       (t (let ((data rtorred--pending-render))
+            (setq rtorred--pending-render nil)
+            (rtorred--render (car data) (cdr data))))))))
 
 (defun rtorred--schedule-render (torrents cols)
   "Render TORRENTS for COLS, deferred to a brief idle.
@@ -1219,7 +1227,10 @@ delay it renders immediately."
 Skips refreshing a buffer that is not displayed (no point fetching and
 re-rendering ~1000 rows nobody is looking at)."
   (when (and (buffer-live-p buf)
-             (get-buffer-window buf 'visible))
+             (get-buffer-window buf 'visible)
+             ;; Don't refresh while a minibuffer command (e.g. consult) is
+             ;; reading -- it would reprint the buffer out from under it.
+             (not (active-minibuffer-window)))
     (with-current-buffer buf
       (unless rtorred--refreshing
         (rtorred--refresh-async)))))
