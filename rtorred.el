@@ -150,6 +150,27 @@ only manual refresh via \\[revert-buffer].  Toggle per-buffer with
 `rtorred-toggle-auto-refresh'."
   :type '(choice (const :tag "Disabled" nil) (number :tag "Seconds")))
 
+;;;; Faces
+
+(defgroup rtorred-faces nil
+  "Faces used by rtorred."
+  :group 'rtorred)
+
+(defface rtorred-seeding '((t :inherit success))
+  "Face for the status of seeding (complete, active) torrents.")
+
+(defface rtorred-leeching '((t :inherit font-lock-keyword-face))
+  "Face for the status of leeching (downloading) torrents.")
+
+(defface rtorred-stopped '((t :inherit shadow))
+  "Face for the status of stopped or paused torrents.")
+
+(defface rtorred-hashing '((t :inherit warning))
+  "Face for the status of torrents being hash-checked.")
+
+(defface rtorred-errored '((t :inherit error))
+  "Face for the status of torrents with an error message.")
+
 ;;;; Transport layer
 ;;
 ;; Everything here turns a finished XML-RPC request string into rtorrent's
@@ -720,9 +741,15 @@ One of: error, hashing, stopped, paused, seeding, leeching."
   "All status strings `rtorred--status-of' can return.")
 
 (defun rtorred--fmt-status (tr)
-  "Return a short status string for torrent TR, faced for errors."
+  "Return a short, faced status string for torrent TR."
   (let ((s (rtorred--status-of tr)))
-    (if (equal s "error") (propertize s 'face 'error) s)))
+    (propertize s 'face (pcase s
+                          ("seeding" 'rtorred-seeding)
+                          ("leeching" 'rtorred-leeching)
+                          ("hashing" 'rtorred-hashing)
+                          ("error" 'rtorred-errored)
+                          ((or "stopped" "paused") 'rtorred-stopped)
+                          (_ 'default)))))
 
 (defun rtorred--all-columns ()
   "Return the master alist of column definitions, (KEY . PLIST).
@@ -1178,6 +1205,29 @@ METHOD is a single-argument rtorrent command such as \"d.start\"."
   (interactive)
   (rtorred--priority-adjust -1))
 
+(defun rtorred-toggle-pause ()
+  "Pause active torrents and resume paused ones (marked-or-current).
+Each torrent is toggled based on its own current state."
+  (interactive)
+  (let ((hashes (rtorred--marked-or-current))
+        (buf (current-buffer)))
+    (if (null hashes)
+        (message "rtorred: no torrent here")
+      (rtorred--run-batch
+       (mapcar
+        (lambda (h)
+          (lambda (k)
+            (rtorred-rpc-async
+             "d.is_active" (list h)
+             (lambda (active)
+               (rtorred-rpc-async
+                (if (eq active 1) "d.pause" "d.resume") (list h)
+                (lambda (_) (funcall k))
+                (lambda (msg) (message "rtorred: %s" msg) (funcall k))))
+             (lambda (msg) (message "rtorred: %s" msg) (funcall k)))))
+        hashes)
+       (lambda () (rtorred--after-action buf))))))
+
 ;;;; Erase (optionally with server-side data deletion)
 
 (defun rtorred--execute-method ()
@@ -1563,37 +1613,47 @@ aspect whose multicall fails is left nil."
   (insert (propertize title 'face 'bold) "\n"))
 
 (defun rtorred-detail--files (files)
-  "Insert the Files section for FILES (a list of alists)."
+  "Insert the Files section for FILES (a list of alists).
+Each line carries its file index in the `rtorred-file-index' property."
   (rtorred-detail--section (format "Files (%d)" (length files)))
   (if (null files)
       (insert "  —\n\n")
-    (dolist (f files)
-      (let* ((size (or (cdr (assq 'size f)) 0))
-             (dc (cdr (assq 'done-chunks f)))
-             (tc (cdr (assq 'total-chunks f)))
-             (pct (if (and (numberp dc) (numberp tc) (> tc 0))
-                      (/ (* 100 dc) tc) 0)))
-        (insert (format "  %3d%%  %9s  %-4s  %s\n"
-                        pct
-                        (file-size-human-readable size 'iec)
-                        (rtorred--file-priority-label (cdr (assq 'priority f)))
-                        (or (cdr (assq 'path f)) "")))))
+    (let ((i 0))
+      (dolist (f files)
+        (let* ((size (or (cdr (assq 'size f)) 0))
+               (dc (cdr (assq 'done-chunks f)))
+               (tc (cdr (assq 'total-chunks f)))
+               (pct (if (and (numberp dc) (numberp tc) (> tc 0))
+                        (/ (* 100 dc) tc) 0))
+               (start (point)))
+          (insert (format "  %3d%%  %9s  %-4s  %s\n"
+                          pct
+                          (file-size-human-readable size 'iec)
+                          (rtorred--file-priority-label (cdr (assq 'priority f)))
+                          (or (cdr (assq 'path f)) "")))
+          (put-text-property start (point) 'rtorred-file-index i))
+        (setq i (1+ i))))
     (insert "\n")))
 
 (defun rtorred-detail--trackers (trackers)
-  "Insert the Trackers section for TRACKERS (a list of alists)."
+  "Insert the Trackers section for TRACKERS (a list of alists).
+Each line carries its tracker index in the `rtorred-tracker-index' property."
   (rtorred-detail--section (format "Trackers (%d)" (length trackers)))
   (if (null trackers)
       (insert "  —\n\n")
-    (dolist (tk trackers)
-      (let ((c (cdr (assq 'complete tk)))
-            (i (cdr (assq 'incomplete tk))))
-        (insert (format "  %s  %-52s %s\n"
-                        (if (eq (cdr (assq 'enabled tk)) 1) "on " "off")
-                        (or (cdr (assq 'url tk)) "")
-                        (if (and (numberp c) (numberp i))
-                            (format "(seeds %d / peers %d)" c i)
-                          "")))))
+    (let ((i 0))
+      (dolist (tk trackers)
+        (let ((c (cdr (assq 'complete tk)))
+              (in (cdr (assq 'incomplete tk)))
+              (start (point)))
+          (insert (format "  %s  %-52s %s\n"
+                          (if (eq (cdr (assq 'enabled tk)) 1) "on " "off")
+                          (or (cdr (assq 'url tk)) "")
+                          (if (and (numberp c) (numberp in))
+                              (format "(seeds %d / peers %d)" c in)
+                            "")))
+          (put-text-property start (point) 'rtorred-tracker-index i))
+        (setq i (1+ i))))
     (insert "\n")))
 
 (defun rtorred-detail--peers (peers)
@@ -1650,11 +1710,73 @@ snapshot taken when the view was opened."
          (with-current-buffer buf
            (rtorred-detail--render (rtorred-detail--current-torrent) data)))))))
 
+(defun rtorred-detail--refresh-buf (buf)
+  "Re-render detail buffer BUF if it is still live."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf (rtorred-detail--revert))))
+
+(defun rtorred-detail--file-priority (delta)
+  "Adjust the priority of the file at point by DELTA (clamped 0..2)."
+  (let ((idx (get-text-property (point) 'rtorred-file-index)))
+    (if (null idx)
+        (message "rtorred: point is not on a file")
+      (let ((target (format "%s:f%d" rtorred-detail--hash idx))
+            (hash rtorred-detail--hash)
+            (buf (current-buffer)))
+        (rtorred-rpc-async
+         "f.priority" (list target)
+         (lambda (cur)
+           (let ((new (max 0 (min 2 (+ (if (numberp cur) cur 1) delta)))))
+             (rtorred-rpc-async
+              "f.priority.set" (list target new)
+              (lambda (_)
+                ;; Apply the new file priorities to the download.
+                (rtorred-rpc-async
+                 "d.update_priorities" (list hash)
+                 (lambda (_) (rtorred-detail--refresh-buf buf))
+                 (lambda (m) (message "rtorred: %s" m))))
+              (lambda (m) (message "rtorred: %s" m)))))
+         (lambda (m) (message "rtorred: %s" m)))))))
+
+(defun rtorred-detail-file-priority-up ()
+  "Raise the priority of the file at point."
+  (interactive)
+  (rtorred-detail--file-priority 1))
+
+(defun rtorred-detail-file-priority-down ()
+  "Lower the priority of the file at point."
+  (interactive)
+  (rtorred-detail--file-priority -1))
+
+(defun rtorred-detail-toggle-tracker ()
+  "Enable or disable the tracker at point."
+  (interactive)
+  (let ((idx (get-text-property (point) 'rtorred-tracker-index)))
+    (if (null idx)
+        (message "rtorred: point is not on a tracker")
+      (let ((target (format "%s:t%d" rtorred-detail--hash idx))
+            (buf (current-buffer)))
+        (rtorred-rpc-async
+         "t.is_enabled" (list target)
+         (lambda (enabled)
+           (rtorred-rpc-async
+            (if (eq enabled 1) "t.disable" "t.enable") (list target)
+            (lambda (_) (rtorred-detail--refresh-buf buf))
+            (lambda (m) (message "rtorred: %s" m))))
+         (lambda (m) (message "rtorred: %s" m)))))))
+
 (define-derived-mode rtorred-detail-mode special-mode "rtorred-detail"
   "Major mode for an rtorrent download's detail view.
 
-\\<rtorred-detail-mode-map>Refresh with \\[revert-buffer], quit with \\[quit-window]."
+\\<rtorred-detail-mode-map>On a file line, \\[rtorred-detail-file-priority-up] / \
+\\[rtorred-detail-file-priority-down] raise/lower its priority; on a tracker line, \
+\\[rtorred-detail-toggle-tracker] toggles it.  Refresh with \\[revert-buffer], \
+quit with \\[quit-window]."
   (setq-local revert-buffer-function #'rtorred-detail--revert))
+
+(keymap-set rtorred-detail-mode-map "+" #'rtorred-detail-file-priority-up)
+(keymap-set rtorred-detail-mode-map "-" #'rtorred-detail-file-priority-down)
+(keymap-set rtorred-detail-mode-map "t" #'rtorred-detail-toggle-tracker)
 
 (defun rtorred-detail ()
   "Open a detail view for the torrent at point."
@@ -1723,6 +1845,7 @@ when point is on the leading padding or between columns."
 (keymap-set rtorred-mode-map "s" #'rtorred-start)
 (keymap-set rtorred-mode-map "k" #'rtorred-stop)
 (keymap-set rtorred-mode-map "c" #'rtorred-check-hash)
+(keymap-set rtorred-mode-map "P" #'rtorred-toggle-pause)
 (keymap-set rtorred-mode-map "+" #'rtorred-priority-up)
 (keymap-set rtorred-mode-map "-" #'rtorred-priority-down)
 ;; Erase: dired flag/execute, plus immediate erase.

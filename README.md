@@ -125,6 +125,7 @@ chosen values in your init if you like, or just run the command on startup.
 | `n` / `p` | move |
 | `m` / `u` / `DEL` / `U` / `t` | mark / unmark / unmark-back / unmark-all / toggle |
 | `s` / `k` | start / stop |
+| `P` | pause / resume (toggles per torrent) |
 | `c` | hash-check |
 | `+` / `-` | raise / lower priority |
 | `d` / `x` | flag for erase / execute flagged erases |
@@ -136,7 +137,18 @@ chosen values in your init if you like, or just run the command on startup.
 | `q` | quit |
 
 Actions apply to the **marked** torrents, or the one at point if none are
-marked.
+marked. Statuses are color-coded (seeding / leeching / stopped / hashing /
+error), customizable via the `rtorred-faces` group.
+
+### Detail view (`RET` / `i`)
+
+A read-only buffer with the download's overview, files, trackers and peers. It's
+interactive:
+
+- on a **file** line, `+` / `-` raise/lower that file's priority (off / normal /
+  high), applied immediately;
+- on a **tracker** line, `t` enables/disables it;
+- `g` refreshes, `q` quits.
 
 ### Filtering (`/` prefix)
 
