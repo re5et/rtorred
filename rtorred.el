@@ -493,10 +493,14 @@ Integers become <i8>, strings <string>, a (:base64 . BYTES) cons a
    "</params></methodCall>"))
 
 (defun rtorred--xml-text (node)
-  "Return the concatenated text content of xml.el NODE."
+  "Return the concatenated text content of xml.el NODE.
+Fast-paths the common leaf case of a single text child."
   (if (stringp node)
       node
-    (mapconcat (lambda (c) (if (stringp c) c "")) (cddr node) "")))
+    (let ((cs (cddr node)))
+      (cond ((null cs) "")
+            ((and (stringp (car cs)) (null (cdr cs))) (car cs))
+            (t (mapconcat (lambda (c) (if (stringp c) c "")) cs ""))))))
 
 (defun rtorred--xml-child (node tag)
   "Return the first child element of NODE with the given TAG, or nil."
@@ -504,8 +508,11 @@ Integers become <i8>, strings <string>, a (:base64 . BYTES) cons a
 
 (defun rtorred--xmlrpc-parse-value (value-node)
   "Convert an XML-RPC <value> element VALUE-NODE to a Lisp value."
-  (let* ((elements (cl-remove-if-not #'consp (cddr value-node)))
-         (typed (car elements)))
+  ;; Find the first element child without allocating an intermediate list
+  ;; -- this runs for every scalar in a ~15k-node multicall response.
+  (let ((typed nil) (cs (cddr value-node)))
+    (while cs
+      (if (consp (car cs)) (setq typed (car cs) cs nil) (setq cs (cdr cs))))
     (if (null typed)
         ;; An untyped <value> is, per spec, a string.
         (rtorred--xml-text value-node)
@@ -525,12 +532,22 @@ Integers become <i8>, strings <string>, a (:base64 . BYTES) cons a
                  (xml-get-children typed 'member)))
         (_ (rtorred--xml-text value-node))))))
 
+(defun rtorred--parse-xml (raw)
+  "Parse RAW XML into a root node.
+Uses the C `libxml' parser when available -- it is dramatically faster
+than `xml-parse-region' on the large multicall responses -- and falls
+back to `xml-parse-region' otherwise.  Both yield the same node shape."
+  (with-temp-buffer
+    (insert (decode-coding-string raw 'utf-8))
+    (if (libxml-available-p)
+        (libxml-parse-xml-region (point-min) (point-max))
+      (car (xml-parse-region (point-min) (point-max))))))
+
 (defun rtorred--xmlrpc-decode (raw)
   "Parse RAW, an XML-RPC <methodResponse> string, into a Lisp value.
 Signals an error if rtorrent returned a <fault>."
-  (let* ((root (with-temp-buffer
-                 (insert (decode-coding-string raw 'utf-8))
-                 (car (xml-parse-region (point-min) (point-max)))))
+  (let* ((gc-cons-threshold (max gc-cons-threshold (* 256 1024 1024)))
+         (root (rtorred--parse-xml raw))
          (fault (and root (rtorred--xml-child root 'fault)))
          (params (and root (rtorred--xml-child root 'params))))
     (cond
@@ -744,15 +761,25 @@ needs a working `rtorred-rpc-url'.  Synchronous (it blocks briefly)."
   "Render the directory of torrent TR."
   (or (rtorred--field tr 'directory) ""))
 
+(defvar rtorred--gradient-cache (make-hash-table :test 'equal)
+  "Memoizes `rtorred--gradient-color' results, keyed by (PCT . BG-MODE).")
+
 (defun rtorred--gradient-color (frac)
   "Return a hex foreground colour for FRAC in 0..1.
 Interpolates red (0) through yellow to green (1) in HSL, with lightness
-adapted to the frame's light/dark background for legibility."
-  (let* ((f (max 0.0 (min 1.0 frac)))
-         (hue (/ (* f 120.0) 360.0))
-         (light (if (eq (frame-parameter nil 'background-mode) 'light) 0.40 0.62))
-         (rgb (color-hsl-to-rgb hue 0.6 light)))
-    (apply #'color-rgb-to-hex (append rgb '(2)))))
+adapted to the frame's light/dark background for legibility.  Results
+are memoized (only ~100 distinct values), since this is called for every
+visible row on every refresh."
+  (let* ((pct (max 0 (min 100 (round (* frac 100)))))
+         (bg (frame-parameter nil 'background-mode))
+         (key (cons pct bg)))
+    (or (gethash key rtorred--gradient-cache)
+        (puthash key
+                 (let* ((hue (/ (* (/ pct 100.0) 120.0) 360.0))
+                        (light (if (eq bg 'light) 0.40 0.62))
+                        (rgb (color-hsl-to-rgb hue 0.6 light)))
+                   (apply #'color-rgb-to-hex (append rgb '(2))))
+                 rtorred--gradient-cache))))
 
 (defun rtorred--fmt-percent (tr)
   "Render the completion percentage of torrent TR."
@@ -956,16 +983,19 @@ only when it satisfies every filter (AND).")
      torrents)))
 
 (defun rtorred--apply-tags ()
-  "Redraw the mark/flag tag in the padding column of every visible row."
-  (save-excursion
-    (goto-char (point-min))
-    (while (not (eobp))
-      (let ((id (tabulated-list-get-id)))
-        (tabulated-list-put-tag
-         (cond ((and id (member id rtorred--flags)) "D")
-               ((and id (member id rtorred--marks)) "*")
-               (t " "))
-         t)))))
+  "Redraw the mark/flag tag in the padding column of every visible row.
+A no-op when nothing is marked or flagged -- `tabulated-list-print'
+already leaves the padding blank, so the common case costs nothing."
+  (when (or rtorred--marks rtorred--flags)
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let ((id (tabulated-list-get-id)))
+          (tabulated-list-put-tag
+           (cond ((and id (member id rtorred--flags)) "D")
+                 ((and id (member id rtorred--marks)) "*")
+                 (t " "))
+           t))))))
 
 (defun rtorred--torrent-num (hash field)
   "Return numeric FIELD of the torrent with HASH, defaulting to 0.
@@ -1054,7 +1084,8 @@ column when the requested one is absent or unsortable."
   "Populate the current buffer from TORRENTS using column defs COLS.
 Re-prints the list, preserving point (by torrent), the sort order, and
 the marks/flags (pruned to torrents that still exist)."
-  (let ((visible (rtorred--visible-torrents torrents)))
+  (let ((gc-cons-threshold (max gc-cons-threshold (* 256 1024 1024)))
+        (visible (rtorred--visible-torrents torrents)))
     ;; Only visible torrents are stored, so marks, sorting, actions and the
     ;; detail view all operate on the filtered set -- hidden rows cannot be
     ;; acted on.
@@ -1123,8 +1154,11 @@ Skips out if a refresh is already in flight for this buffer."
   (rtorred--refresh-async))
 
 (defun rtorred--timer-tick (buf)
-  "Fire an async refresh in BUF if it is alive and idle."
-  (when (buffer-live-p buf)
+  "Fire an async refresh in BUF if it is alive, visible, and idle.
+Skips refreshing a buffer that is not displayed (no point fetching and
+re-rendering ~1000 rows nobody is looking at)."
+  (when (and (buffer-live-p buf)
+             (get-buffer-window buf 'visible))
     (with-current-buffer buf
       (unless rtorred--refreshing
         (rtorred--refresh-async)))))

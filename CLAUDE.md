@@ -55,6 +55,23 @@ diagnostics (`rtorred-detect-time-methods`), the major mode + keymap.
 - **Server-side `rm`** (delete data): only when an `execute*` method exists;
   validate paths with `rtorred--safe-rm-path-p`; always confirm.
 
+## Performance
+
+Large views (~1000 torrents) make each auto-refresh a synchronous burst in the
+async callback. Keep it cheap:
+
+- **Parse with `libxml`** (`rtorred--parse-xml`): ~30x faster than `xml.el` on a
+  500KB+ multicall response (≈860ms → ≈30ms).
+- **Lean value walk**: `rtorred--xmlrpc-parse-value` avoids per-node
+  `cl-remove-if-not`/`mapconcat` allocation; decode + render bind a high
+  `gc-cons-threshold` so the allocation spike doesn't trigger GC pauses.
+- **Memoize** computed colours (`rtorred--gradient-cache`); skip the per-row tag
+  pass when nothing is marked; skip refresh entirely when the buffer is not
+  visible (`get-buffer-window BUF 'visible`).
+- Fewer/narrower columns and a longer `rtorred-auto-refresh-interval` both cut
+  per-refresh cost. To profile, time `rtorred--xmlrpc-decode` and
+  `rtorred--render` separately via the live IDE eval.
+
 ## rtorrent RPC gotchas
 
 - `d.multicall2` is all-or-nothing — hence the availability filtering.
