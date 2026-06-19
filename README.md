@@ -134,12 +134,29 @@ many columns on a narrow window it bottoms out at that minimum — trim
       rtorred-ratio-good 2.0)   ; ratio coloured fully green
 ```
 
-Status cells use the customizable faces in the `rtorred-faces` group.
+Status cells use the customizable faces in the `rtorred-faces` group. The
+current line is highlighted via `hl-line`:
+
+```elisp
+(setq rtorred-hl-line t)              ; nil to disable; restyle the `hl-line' face
+```
 
 ### Auto-refresh
 
 ```elisp
 (setq rtorred-auto-refresh-interval 3)   ; seconds; nil to disable
+(setq rtorred-render-idle-delay 0.2)     ; redraw after this much idle; nil = immediate
+```
+
+Refreshing is non-blocking and pauses while a minibuffer command (e.g. a
+`consult` search) is reading from the buffer.
+
+### Other options
+
+```elisp
+(setq rtorred-view "main")            ; rtorrent view to list (main/started/stopped/...)
+(setq rtorred-rpc-timeout 10)         ; seconds to wait for a reply
+(setq rtorred-time-format "%Y-%m-%d %H:%M")  ; Added / Done-At columns
 ```
 
 ## Usage
@@ -197,7 +214,9 @@ markable or operable. Active filters show in the mode-line.
 "Erase + delete data" works by asking rtorrent to `rm -rf` the data on its own
 host via the `execute` command — the only way for a remote client to remove
 remote files. rtorred feature-detects `execute` and hides the option when it's
-unavailable, refuses obviously unsafe paths, and always confirms.
+unavailable, refuses obviously unsafe paths, and — before deleting anything —
+lists the exact `rm -rf -- <path>` commands it will run, dired-style, and asks
+you to confirm.
 
 Be aware: an rtorrent XML-RPC endpoint that exposes `execute` is effectively a
 remote code execution surface. Protect it (TLS, auth, network restrictions) and
