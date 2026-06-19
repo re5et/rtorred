@@ -52,6 +52,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'color)
+(require 'hl-line)
 (require 'xml)
 (require 'url)
 (require 'url-http)
@@ -218,6 +219,12 @@ Red at 0, yellow at break-even (1.0), green at `rtorred-ratio-good'."
   "Share ratio that the Ratio gradient colours fully green.
 Ratios at or above this are green; 1.0 is yellow; 0 is red."
   :type 'number
+  :group 'rtorred-faces)
+
+(defcustom rtorred-hl-line t
+  "Whether to highlight the current line in an rtorred buffer.
+Enables `hl-line-mode'; the highlight uses the `hl-line' face."
+  :type 'boolean
   :group 'rtorred-faces)
 
 ;;;; Transport layer
@@ -1141,7 +1148,10 @@ the marks/flags (pruned to torrents that still exist)."
       (rtorred--apply-tags))
     (when (and win (window-live-p win) top-id)
       (let ((pos (rtorred--row-position top-id)))
-        (when pos (set-window-start win pos t))))))
+        (when pos (set-window-start win pos t))))
+    ;; Reprinting moves the hl-line overlay off point; put it back.
+    (when (bound-and-true-p hl-line-mode)
+      (hl-line-highlight))))
 
 (defun rtorred--refresh ()
   "Refetch synchronously and re-render the current buffer."
@@ -2139,6 +2149,7 @@ blocking Emacs, and the buffer auto-refreshes on a timer (see
   ;; space before the first column (the `dired'/`package-menu' convention).
   (setq tabulated-list-padding 2)
   (setq-local truncate-lines t)
+  (when rtorred-hl-line (hl-line-mode 1))
   (setq-local revert-buffer-function #'rtorred-revert)
   (add-hook 'kill-buffer-hook #'rtorred--stop-timer nil t)
   ;; Flex the Name column to the window width, and keep it sized on resize.
