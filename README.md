@@ -1,0 +1,143 @@
+# rtorred
+
+An [rtorrent](https://rakshasa.github.io/rtorrent/) client for Emacs, in the
+spirit of `dired` and `proced`: a live, sortable, filterable buffer of your
+downloads that you act on with single-key commands.
+
+> Status: early but usable. Zero external dependencies — just Emacs.
+
+## Features
+
+- **Pluggable transport**, chosen by one URL variable — all carrying the same
+  XML-RPC payload:
+  - local SCGI **unix socket** (`~/.rtorrent.rpc`)
+  - SCGI over **TCP** (`scgi://host:5000`)
+  - XML-RPC over **HTTP(S)** (`https://host/RPC2`), with **basic auth** via
+    `auth-source`
+- **Asynchronous** RPC — Emacs never blocks waiting on rtorrent — with a
+  proced-style **auto-refresh** timer.
+- **Declarative, configurable columns** (name, size, progress, rates, ratio,
+  status, added/completed time, …) with numeric-aware sorting.
+- **dired-style marking** (`*` marks, `D` erase flags) and actions on the
+  marked-or-current set: start, stop, hash-check, priority.
+- **Erase**, optionally **also deleting the data server-side** (via rtorrent's
+  `execute`), feature-detected and with path-safety guards.
+- **Detail view** (`RET`): overview, files, trackers, peers.
+- **Add** a `.torrent` file (uploaded as base64) or a magnet/URL.
+- **Filtering** (`/` prefix): done, ratio, status, active, downloading, name —
+  composed with AND; hidden rows can't be marked or operated on.
+
+## Requirements
+
+- Emacs 29.1+
+- rtorrent with its XML-RPC/SCGI interface enabled (any reasonably recent
+  build; everything degrades gracefully when a method is missing).
+
+## Installation
+
+Clone, then load it:
+
+```elisp
+(add-to-list 'load-path "/path/to/rtorred")
+(require 'rtorred)
+```
+
+## Configuration
+
+Point rtorred at rtorrent. The transport is inferred from the URL:
+
+```elisp
+;; local unix socket (network.scgi.open_local in rtorrent.rc)
+(setq rtorred-rpc-url "~/.rtorrent.rpc")
+
+;; SCGI over TCP (network.scgi.open_port)
+(setq rtorred-rpc-url "scgi://localhost:5000")
+
+;; XML-RPC over HTTP(S), e.g. behind nginx/apache or a seedbox panel
+(setq rtorred-rpc-url "https://myhost.example.com/RPC2")
+```
+
+### Authentication (HTTP only)
+
+Keep credentials out of your config with `auth-source`. Add a line to
+`~/.authinfo.gpg` (or `~/.authinfo`):
+
+```
+machine myhost.example.com login alice password s3cret port 443
+```
+
+Credentials are sent preemptively as HTTP Basic auth. (You can also embed them
+in the URL, or set `rtorred-http-auth` to a `(USER . PASS)` cons — both less
+private than `auth-source`.)
+
+### Timestamps
+
+"Added" and "Completed" times vary by rtorrent build. Run:
+
+```
+M-x rtorred-detect-time-methods
+```
+
+once per server. It probes the available methods (and a sample torrent's custom
+fields, e.g. ruTorrent's `addtime`) and auto-sets `rtorred-added-time-method` /
+`rtorred-completed-time-method` to the best available source. Persist the
+chosen values in your init if you like, or just run the command on startup.
+
+### Auto-refresh
+
+```elisp
+(setq rtorred-auto-refresh-interval 3)   ; seconds; nil to disable
+```
+
+## Usage
+
+`M-x rtorred`.
+
+| Key | Action |
+|-----|--------|
+| `n` / `p` | move |
+| `m` / `u` / `DEL` / `U` / `t` | mark / unmark / unmark-back / unmark-all / toggle |
+| `s` / `k` | start / stop |
+| `c` | hash-check |
+| `+` / `-` | raise / lower priority |
+| `d` / `x` | flag for erase / execute flagged erases |
+| `D` | erase marked-or-current now |
+| `a` / `A` | add torrent file / magnet or URL (prefix arg = don't start) |
+| `RET` / `i` | detail view (files, trackers, peers) |
+| `S` | sort (completes a column when point isn't on one) |
+| `g` / `G` | refresh / toggle auto-refresh |
+| `q` | quit |
+
+Actions apply to the **marked** torrents, or the one at point if none are
+marked.
+
+### Filtering (`/` prefix)
+
+| Key | Filter |
+|-----|--------|
+| `/ d` | 100% done |
+| `/ r` | ratio greater than N |
+| `/ s` | status |
+| `/ a` | active (started, not paused) |
+| `/ D` | actively downloading (download rate > 0) |
+| `/ f` | name matches regexp |
+| `/ p` | pop last filter |
+| `/ x` (or `/ /`) | clear all filters |
+
+Filters compose with AND and narrow the data model, so hidden torrents are not
+markable or operable. Active filters show in the mode-line.
+
+## Deleting data (security note)
+
+"Erase + delete data" works by asking rtorrent to `rm -rf` the data on its own
+host via the `execute` command — the only way for a remote client to remove
+remote files. rtorred feature-detects `execute` and hides the option when it's
+unavailable, refuses obviously unsafe paths, and always confirms.
+
+Be aware: an rtorrent XML-RPC endpoint that exposes `execute` is effectively a
+remote code execution surface. Protect it (TLS, auth, network restrictions) and
+run rtorrent as an unprivileged user.
+
+## License
+
+GPL-3.0-or-later.
