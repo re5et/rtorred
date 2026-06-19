@@ -213,7 +213,9 @@ interactive:
 | `/ x` (or `/ /`) | clear all filters |
 
 Filters compose with AND and narrow the data model, so hidden torrents are not
-markable or operable. Active filters show in the mode-line.
+markable or operable. The mode-line shows the torrent count — `shown/total`
+when filtered, plain total otherwise — alongside a `↻` while refreshing, the
+auto-refresh interval, and any active filters.
 
 ## Deleting data (security note)
 

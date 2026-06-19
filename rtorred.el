@@ -994,7 +994,11 @@ message string."
 ;;;; Data model
 
 (defvar-local rtorred--torrents nil
-  "Alist mapping a torrent hash to its field alist, for the current buffer.")
+  "Alist mapping a torrent hash to its field alist, for the current buffer.
+Holds only the torrents currently visible (after filtering).")
+
+(defvar-local rtorred--total-count 0
+  "Number of torrents fetched in the last refresh, before filtering.")
 
 (defvar-local rtorred--marks nil
   "List of hashes with an action mark (shown as `*'), for this buffer.")
@@ -1149,6 +1153,7 @@ the marks/flags (pruned to torrents that still exist)."
     ;; acted on.
     (setq rtorred--torrents
           (mapcar (lambda (tr) (cons (cdr (assq 'hash tr)) tr)) visible))
+    (setq rtorred--total-count (length torrents))
     (let ((present (mapcar #'car rtorred--torrents)))
       (setq rtorred--marks (cl-intersection rtorred--marks present :test #'equal)
             rtorred--flags (cl-intersection rtorred--flags present :test #'equal)))
@@ -1186,17 +1191,22 @@ the marks/flags (pruned to torrents that still exist)."
   "Latest (TORRENTS . COLS) awaiting a deferred render, or nil.")
 
 (defun rtorred--mode-line ()
-  "Update the rtorred mode-line indicator for refresh/auto state."
-  (setq mode-line-process
-        (concat (and rtorred--refreshing " ↻")
-                (and rtorred--refresh-timer
-                     (format " [auto:%ss]" rtorred-auto-refresh-interval))
-                (and rtorred--filters
-                     (format " {%s}"
-                             (string-join
-                              (mapcar (lambda (f) (plist-get f :desc))
-                                      (reverse rtorred--filters))
-                              ",")))))
+  "Update the rtorred mode-line indicator (count, refresh/auto state, filters)."
+  (let* ((shown (length rtorred--torrents))
+         (count (if rtorred--filters
+                    (format "%d/%d" shown rtorred--total-count)
+                  (number-to-string rtorred--total-count))))
+    (setq mode-line-process
+          (concat (format " %s" count)
+                  (and rtorred--refreshing " ↻")
+                  (and rtorred--refresh-timer
+                       (format " [auto:%ss]" rtorred-auto-refresh-interval))
+                  (and rtorred--filters
+                       (format " {%s}"
+                               (string-join
+                                (mapcar (lambda (f) (plist-get f :desc))
+                                        (reverse rtorred--filters))
+                                ","))))))
   (force-mode-line-update))
 
 (defun rtorred--refresh-async ()
