@@ -121,6 +121,12 @@ list to taste -- adding a brand-new column means defining it in
 `rtorred--all-columns' and adding its key here."
   :type '(repeat symbol))
 
+(defcustom rtorred-name-min-width 20
+  "Minimum width of the Name column.
+The Name column flexes to fill the window width left over by the other
+columns, but never shrinks below this."
+  :type 'integer)
+
 (defcustom rtorred-default-sort '(name . ascending)
   "Initial sort for new rtorred buffers.
 
@@ -993,6 +999,33 @@ Coerces string epoch/values (e.g. from custom fields) to numbers."
                              (rtorred--sort-spec col))
                        (and (eq (plist-get p :align) 'right) '(:right-align t)))))
            cols)))
+
+(defun rtorred--name-width (cols)
+  "Compute a Name-column width for COLS that fills the selected window.
+Returns at least `rtorred-name-min-width'."
+  (let* ((others (cl-loop for col in cols
+                          unless (eq (car col) 'name)
+                          sum (plist-get (cdr col) :width)))
+         ;; Each column adds 1 (its `pad-right'); plus the leading padding;
+         ;; minus a small margin so the line never exceeds the window.
+         (avail (- (window-body-width) tabulated-list-padding
+                   (length cols) others 1)))
+    (max rtorred-name-min-width avail)))
+
+(defun rtorred--adjust-name-width ()
+  "Resize the Name column to fill the window, reprinting if it changed.
+Used from `window-configuration-change-hook' and on open."
+  (when (and (derived-mode-p 'rtorred-mode)
+             (vectorp tabulated-list-format))
+    (let* ((cols (rtorred--active-columns))
+           (idx (cl-position 'name cols :key #'car)))
+      (when (and idx (< idx (length tabulated-list-format)))
+        (let ((new (rtorred--name-width cols))
+              (entry (aref tabulated-list-format idx)))
+          (unless (= new (nth 1 entry))
+            (setf (nth 1 entry) new)
+            (tabulated-list-init-header)
+            (tabulated-list-print t)))))))
 
 (defun rtorred--default-sort-key (cols)
   "Return an initial `tabulated-list-sort-key' for column defs COLS.
@@ -1942,8 +1975,11 @@ blocking Emacs, and the buffer auto-refreshes on a timer (see
   ;; Two-wide padding: one column for the mark/flag tag plus a separating
   ;; space before the first column (the `dired'/`package-menu' convention).
   (setq tabulated-list-padding 2)
+  (setq-local truncate-lines t)
   (setq-local revert-buffer-function #'rtorred-revert)
   (add-hook 'kill-buffer-hook #'rtorred--stop-timer nil t)
+  ;; Flex the Name column to the window width, and keep it sized on resize.
+  (add-hook 'window-configuration-change-hook #'rtorred--adjust-name-width nil t)
   (tabulated-list-init-header)
   (rtorred--start-timer)
   (rtorred--mode-line))
@@ -1958,7 +1994,9 @@ blocking Emacs, and the buffer auto-refreshes on a timer (see
         (rtorred-mode))
       (tabulated-list-print)
       (rtorred--refresh-async))
-    (pop-to-buffer-same-window buf)))
+    (pop-to-buffer-same-window buf)
+    ;; Size the Name column now that the buffer is in a window.
+    (with-current-buffer buf (rtorred--adjust-name-width))))
 
 (provide 'rtorred)
 ;;; rtorred.el ends here

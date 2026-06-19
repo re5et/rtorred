@@ -120,6 +120,11 @@ chosen values in your init if you like, or just run the command on startup.
 (setq rtorred-default-sort '(added . descending))   ; newest first
 ```
 
+The Name column flexes to fill the window width left over by the other
+columns (truncating only when it must), down to `rtorred-name-min-width`. With
+many columns on a narrow window it bottoms out at that minimum — trim
+`rtorred-columns` or widen the window to give names more room.
+
 ### Colors
 
 ```elisp
