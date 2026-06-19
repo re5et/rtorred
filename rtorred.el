@@ -129,6 +129,13 @@ The Name column flexes to fill the window width left over by the other
 columns, but never shrinks below this."
   :type 'integer)
 
+(defcustom rtorred-column-widths nil
+  "Alist of (COLUMN-KEY . WIDTH) overriding default column widths.
+Keys are as in `rtorred-columns'; unlisted columns keep their default
+width.  The Name column flexes regardless of any override here.  Takes
+effect for buffers opened afterwards."
+  :type '(alist :key-type symbol :value-type integer))
+
 (defcustom rtorred-default-sort '(name . ascending)
   "Initial sort for new rtorred buffers.
 
@@ -1046,13 +1053,18 @@ Coerces string epoch/values (e.g. from custom fields) to numbers."
           ((symbolp s) (rtorred--num-sorter s))
           (t s))))
 
+(defun rtorred--column-width (col)
+  "Return the display width for column def COL, honouring `rtorred-column-widths'."
+  (or (cdr (assq (car col) rtorred-column-widths))
+      (plist-get (cdr col) :width)))
+
 (defun rtorred--list-format (cols)
   "Build a `tabulated-list-format' vector for column defs COLS."
   (vconcat
    (mapcar (lambda (col)
              (let ((p (cdr col)))
                (append (list (plist-get p :label)
-                             (plist-get p :width)
+                             (rtorred--column-width col)
                              (rtorred--sort-spec col))
                        (and (eq (plist-get p :align) 'right) '(:right-align t)))))
            cols)))
@@ -1062,7 +1074,7 @@ Coerces string epoch/values (e.g. from custom fields) to numbers."
 Returns at least `rtorred-name-min-width'."
   (let* ((others (cl-loop for col in cols
                           unless (eq (car col) 'name)
-                          sum (plist-get (cdr col) :width)))
+                          sum (rtorred--column-width col)))
          ;; Each column adds 1 (its `pad-right'); plus the leading padding;
          ;; minus a small margin so the line never exceeds the window.
          (avail (- (window-body-width) tabulated-list-padding

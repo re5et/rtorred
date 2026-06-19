@@ -110,11 +110,17 @@ fields, e.g. ruTorrent's `addtime`) and auto-sets `rtorred-added-time-method` /
 `rtorred-completed-time-method` to the best available source. Persist the
 chosen values in your init if you like, or just run the command on startup.
 
+(The set of available methods is cached per connection; `M-x
+rtorred-refresh-methods` forgets it, e.g. after the server is upgraded.)
+
 ### Columns and sorting
 
 ```elisp
 ;; which columns, in order (keys; see the docstring for the full set)
 (setq rtorred-columns '(name size done up ratio status added))
+
+;; override individual column widths (Name flexes regardless)
+(setq rtorred-column-widths '((status . 11) (ratio . 6)))
 
 ;; initial sort: (COLUMN-KEY . DIRECTION), or nil for rtorrent's view order
 (setq rtorred-default-sort '(added . descending))   ; newest first
