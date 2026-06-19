@@ -3,6 +3,7 @@
 ;; Copyright (C) 2026
 
 ;; Author: atom
+;; Assisted-by: Claude Code:claude-opus-4-8
 ;; URL: https://github.com/re5et/rtorred
 ;; Keywords: comm, files, processes
 ;; Package-Requires: ((emacs "29.1"))
