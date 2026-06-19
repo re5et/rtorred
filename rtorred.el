@@ -1472,6 +1472,31 @@ METHOD is a single-argument rtorrent command such as \"d.start\"."
   (interactive)
   (rtorred--priority-adjust -1))
 
+(defun rtorred-retry ()
+  "Clear the error on the marked-or-current torrent(s) and re-announce.
+Clears `d.message' and re-announces to the trackers -- the usual remedy
+for a transient tracker error (e.g. \"Unable to connect to UDP
+tracker\").  Harmless on healthy torrents (just a fresh announce)."
+  (interactive)
+  (let ((hashes (rtorred--marked-or-current))
+        (buf (current-buffer)))
+    (if (null hashes)
+        (message "rtorred: no torrent here")
+      (rtorred--run-batch
+       (mapcar
+        (lambda (h)
+          (lambda (k)
+            (rtorred-rpc-async
+             "d.message.set" (list h "")
+             (lambda (_)
+               (rtorred-rpc-async
+                "d.tracker_announce" (list h)
+                (lambda (_) (funcall k))
+                (lambda (msg) (message "rtorred: %s" msg) (funcall k h))))
+             (lambda (msg) (message "rtorred: %s" msg) (funcall k h)))))
+        hashes)
+       (lambda (failures) (rtorred--after-action buf failures))))))
+
 (defun rtorred-toggle-pause ()
   "Pause active torrents and resume paused ones (marked-or-current).
 Each torrent is toggled based on its own current state."
@@ -2208,6 +2233,7 @@ when point is on the leading padding or between columns."
 (keymap-set rtorred-mode-map "s" #'rtorred-start)
 (keymap-set rtorred-mode-map "k" #'rtorred-stop)
 (keymap-set rtorred-mode-map "c" #'rtorred-check-hash)
+(keymap-set rtorred-mode-map "r" #'rtorred-retry)
 (keymap-set rtorred-mode-map "P" #'rtorred-toggle-pause)
 (keymap-set rtorred-mode-map "+" #'rtorred-priority-up)
 (keymap-set rtorred-mode-map "-" #'rtorred-priority-down)

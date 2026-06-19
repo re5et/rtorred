@@ -176,6 +176,7 @@ Refreshing is non-blocking and pauses while a minibuffer command (e.g. a
 | `s` / `k` | start / stop |
 | `P` | pause / resume (toggles per torrent) |
 | `c` | hash-check |
+| `r` | clear error + re-announce (retry a tracker error) |
 | `+` / `-` | raise / lower priority |
 | `d` / `x` | flag for erase / execute flagged erases |
 | `D` | erase marked-or-current now |
