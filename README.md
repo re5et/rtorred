@@ -116,11 +116,15 @@ rtorred-refresh-methods` forgets it, e.g. after the server is upgraded.)
 ### Columns and sorting
 
 ```elisp
-;; which columns, in order (keys; see the docstring for the full set)
-(setq rtorred-columns '(name size done up ratio status added))
+;; which columns, in order. Available keys: name size done down up uploaded
+;; ratio peers seeds status added completed directory priority
+(setq rtorred-columns '(name size done up ratio peers seeds status added))
 
 ;; override individual column widths (Name flexes regardless)
 (setq rtorred-column-widths '((status . 11) (ratio . 6)))
+
+;; show Added / Done-At as relative ages ("3d", "5h") instead of timestamps
+(setq rtorred-time-relative t)
 
 ;; initial sort: (COLUMN-KEY . DIRECTION), or nil for rtorrent's view order
 (setq rtorred-default-sort '(added . descending))   ; newest first
@@ -150,7 +154,7 @@ current line is highlighted via `hl-line`:
 ### Auto-refresh
 
 ```elisp
-(setq rtorred-auto-refresh-interval 3)   ; seconds; nil to disable
+(setq rtorred-auto-refresh-interval 5)   ; seconds (default 5); nil to disable
 (setq rtorred-render-idle-delay 0.2)     ; redraw after this much idle; nil = immediate
 ```
 

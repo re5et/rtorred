@@ -133,7 +133,7 @@ The lookup order is: this variable, then the URL, then `auth-source'."
 
 Each key must name a column defined in `rtorred--all-columns'; the
 available keys are: name, size, done, down, up, uploaded, ratio,
-status, added, completed, directory, priority.  Reorder or trim this
+peers, seeds, status, added, completed, directory, priority.  Reorder or trim this
 list to taste -- adding a brand-new column means defining it in
 `rtorred--all-columns' and adding its key here."
   :type '(repeat symbol))
@@ -186,10 +186,16 @@ On older builds, point this at a custom field, e.g.
   :type 'string)
 
 (defcustom rtorred-time-format "%Y-%m-%d %H:%M"
-  "`format-time-string' format for the Added and Done-At columns."
+  "`format-time-string' format for the Added and Done-At columns.
+Ignored when `rtorred-time-relative' is non-nil."
   :type 'string)
 
-(defcustom rtorred-auto-refresh-interval 3
+(defcustom rtorred-time-relative nil
+  "When non-nil, show the Added and Done-At columns as relative ages.
+E.g. \"3d\", \"5h\", \"2w\" instead of an absolute timestamp."
+  :type 'boolean)
+
+(defcustom rtorred-auto-refresh-interval 5
   "Seconds between automatic refreshes of an rtorred buffer.
 A number enables auto-refresh (like `proced'); nil disables it, leaving
 only manual refresh via \\[revert-buffer].  Toggle per-buffer with
@@ -223,6 +229,10 @@ typing.  nil redraws immediately (no deferral)."
 
 (defface rtorred-errored '((t :inherit error))
   "Face for the status of torrents with an error message.")
+
+(defface rtorred-refreshing '((t :inherit success))
+  "Face for the mode-line refresh icon while a refresh is in flight.
+When idle the icon uses the `shadow' face instead.")
 
 (defcustom rtorred-percent-gradient t
   "Whether to color the Done column by a red-to-green completion gradient.
@@ -795,12 +805,33 @@ needs a working `rtorred-rpc-url'.  Synchronous (it blocks briefly)."
   "Return a formatter rendering numeric field KEY as a transfer rate."
   (lambda (tr) (rtorred--rate (rtorred--field tr key))))
 
+(defun rtorred--relative-time (epoch)
+  "Format EPOCH as a compact age relative to now, e.g. \"3d\" or \"5h\"."
+  (let ((diff (- (float-time) epoch)))
+    (cond ((< diff 0) "—")
+          ((< diff 60) "now")
+          ((< diff 3600) (format "%dm" (truncate diff 60)))
+          ((< diff 86400) (format "%dh" (truncate diff 3600)))
+          ((< diff 604800) (format "%dd" (truncate diff 86400)))
+          ((< diff 31536000) (format "%dw" (truncate diff 604800)))
+          (t (format "%dy" (truncate diff 31536000))))))
+
 (defun rtorred--fmt-time (key)
-  "Return a formatter rendering epoch field KEY via `rtorred-time-format'."
+  "Return a formatter rendering epoch field KEY.
+Uses a relative age when `rtorred-time-relative' is set, else
+`rtorred-time-format'."
   (lambda (tr)
     (let* ((v (rtorred--field tr key))
            (n (cond ((numberp v) v) ((stringp v) (string-to-number v)) (t 0))))
-      (if (> n 0) (format-time-string rtorred-time-format n) ""))))
+      (cond ((<= n 0) "")
+            (rtorred-time-relative (rtorred--relative-time n))
+            (t (format-time-string rtorred-time-format n))))))
+
+(defun rtorred--fmt-count (key)
+  "Return a formatter rendering integer field KEY, blank when zero."
+  (lambda (tr)
+    (let ((n (rtorred--field tr key)))
+      (if (and (numberp n) (> n 0)) (number-to-string n) ""))))
 
 (defun rtorred--fmt-name (tr)
   "Render the name of torrent TR."
@@ -920,6 +951,12 @@ numerically by that field)."
     (ratio     . (:label "Ratio"     :width 7 :align right
                   :fields ((ratio . "d.ratio"))
                   :format ,#'rtorred--fmt-ratio :sort ratio))
+    (peers     . (:label "Peers"     :width 6 :align right
+                  :fields ((peers . "d.peers_connected"))
+                  :format ,(rtorred--fmt-count 'peers) :sort peers))
+    (seeds     . (:label "Seeds"     :width 6 :align right
+                  :fields ((seeds . "d.peers_complete"))
+                  :format ,(rtorred--fmt-count 'seeds) :sort seeds))
     (status    . (:label "Status"    :width 9
                   :fields ((state . "d.state") (active . "d.is_active")
                            (complete . "d.complete") (hashing . "d.hashing")
@@ -1211,16 +1248,19 @@ the marks/flags (pruned to torrents that still exist)."
                     (format "%d/%d" shown rtorred--total-count)
                   (number-to-string rtorred--total-count))))
     (setq mode-line-process
-          (concat (format " %s" count)
-                  (and rtorred--refreshing " ↻")
-                  (and rtorred--refresh-timer
-                       (format " [auto:%ss]" rtorred-auto-refresh-interval))
-                  (and rtorred--filters
-                       (format " {%s}"
-                               (string-join
-                                (mapcar (lambda (f) (plist-get f :desc))
-                                        (reverse rtorred--filters))
-                                ","))))))
+          (concat
+           ;; Icon first and always present (only its colour changes), so it
+           ;; doesn't appear/disappear and shift the rest of the line.
+           " " (propertize "↻" 'face (if rtorred--refreshing 'rtorred-refreshing 'shadow))
+           " " count
+           (and rtorred--refresh-timer
+                (format " [auto:%ss]" rtorred-auto-refresh-interval))
+           (and rtorred--filters
+                (format " {%s}"
+                        (string-join
+                         (mapcar (lambda (f) (plist-get f :desc))
+                                 (reverse rtorred--filters))
+                         ","))))))
   (force-mode-line-update))
 
 (defun rtorred--refresh-async ()
