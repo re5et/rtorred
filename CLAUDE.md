@@ -53,7 +53,12 @@ diagnostics (`rtorred-detect-time-methods`), the major mode + keymap.
   the matching column is hidden; they compose with AND and hide rows from the
   data model (so hidden rows can't be acted on).
 - **Server-side `rm`** (delete data): only when an `execute*` method exists;
-  validate paths with `rtorred--safe-rm-path-p`; always confirm.
+  always confirm, showing the exact commands. Paths come only from
+  `d.base_path` (never the `d.directory` fallback — that can be the shared
+  root). Every target is screened by `rtorred--rm-unsafe-reason`, which refuses
+  the download root or above, paths that contain another torrent's data, and
+  paths shared by multiple torrents — so a delete can never escape one torrent.
+  (A regression here once `rm -rf`'d a user's whole data dir; keep these layers.)
 
 ## Performance
 

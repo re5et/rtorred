@@ -1497,13 +1497,51 @@ command (locked down), so data deletion must be hidden."
   (seq-find #'rtorred--method-available-p '("execute.throw" "execute2" "execute")))
 
 (defun rtorred--safe-rm-path-p (path)
-  "Return non-nil if PATH is safe to pass to a server-side `rm -rf'.
-Guards against the empty string, the root directory, and relative paths
--- the classic \"deleted the wrong thing\" failure modes."
+  "Return non-nil if PATH passes the basic safety checks for `rm -rf'.
+Guards against the empty string, the root directory, and relative paths.
+This is the first of several layers -- see `rtorred--rm-unsafe-reason'."
   (and (stringp path)
        (string-prefix-p "/" path)
        (> (length path) 1)
        (not (string-match-p "\\`/+\\'" path))))
+
+(defun rtorred--path-ancestor-p (a b)
+  "Non-nil if path A is an ancestor of, or equal to, path B.
+Compares whole path components (so /a/b is not an ancestor of /a/bc)."
+  (string-prefix-p (file-name-as-directory a) (file-name-as-directory b)))
+
+(defun rtorred--rm-unsafe-reason (path root all-paths)
+  "Return a human reason PATH is unsafe to `rm -rf', or nil if it is safe.
+ROOT is the shared download directory (or nil); ALL-PATHS is every target
+path in the batch.  These layers ensure a delete can never reach beyond a
+single torrent's own data, even if path resolution misbehaves."
+  (cond
+   ((not (rtorred--safe-rm-path-p path)) "no usable path")
+   ((and root (rtorred--path-ancestor-p path root)) "the shared download root")
+   ((> (seq-count (lambda (p) (string= p path)) all-paths) 1)
+    "shared by multiple torrents")
+   ((seq-some (lambda (p) (and (not (string= p path))
+                               (rtorred--path-ancestor-p path p)))
+              all-paths)
+    "contains another torrent's data")))
+
+(defvar rtorred--download-root-cache nil
+  "Cons (URL . ROOT) caching rtorrent's default download directory.")
+
+(defun rtorred--download-root-async (callback)
+  "Call CALLBACK with rtorrent's default download directory, or nil.
+Cached per connection; used to refuse deleting the shared root."
+  (if (equal (car rtorred--download-root-cache) rtorred-rpc-url)
+      (funcall callback (cdr rtorred--download-root-cache))
+    (rtorred-rpc-async
+     "directory.default" nil
+     (lambda (root)
+       (setq rtorred--download-root-cache
+             (cons rtorred-rpc-url (and (stringp root) (> (length root) 0) root)))
+       (funcall callback (cdr rtorred--download-root-cache)))
+     (lambda (_)
+       (setq rtorred--download-root-cache (cons rtorred-rpc-url nil))
+       (funcall callback nil)))))
 
 (defun rtorred--resolve-data-path (hash callback)
   "Pass HASH's on-disk data path (`d.base_path') to CALLBACK, or \"\".
@@ -1543,8 +1581,9 @@ re-marked so you can simply retry.  Flags are cleared regardless."
 
 (defun rtorred--maybe-delete-data (hashes buf)
   "Resolve the data paths for HASHES, then confirm deleting them.
-Gathers each torrent's on-disk path first so the confirmation can show
-exactly what will be removed."
+Gathers each torrent's on-disk path and the download root first, so the
+confirmation can show exactly what will be removed and the safety guards
+have everything they need."
   (let ((results nil))
     (rtorred--run-batch
      (mapcar (lambda (h)
@@ -1552,60 +1591,66 @@ exactly what will be removed."
                  (rtorred--resolve-data-path
                   h (lambda (path) (push (cons h path) results) (funcall k)))))
              hashes)
-     (lambda (_failures) (rtorred--confirm-delete-data (nreverse results) buf)))))
+     (lambda (_failures)
+       (rtorred--download-root-async
+        (lambda (root)
+          (rtorred--confirm-delete-data (nreverse results) root buf)))))))
 
-(defun rtorred--confirm-delete-data (results buf)
+(defun rtorred--confirm-delete-data (results root buf)
   "Show the exact `rm' commands for RESULTS, ask, then erase.
-RESULTS is a list of (HASH . PATH).  Paths that fail
-`rtorred--safe-rm-path-p' are never sent to the server; those torrents
-are still erased (data left on disk)."
-  (let ((safe (seq-filter (lambda (r) (rtorred--safe-rm-path-p (cdr r))) results))
-        (unsafe (seq-remove (lambda (r) (rtorred--safe-rm-path-p (cdr r))) results)))
-    (if (null safe)
-        ;; Nothing we can safely delete -- just erase, explaining why.
+RESULTS is a list of (HASH . PATH); ROOT is the download root.  Each path
+is screened by `rtorred--rm-unsafe-reason'; only paths that clear every
+guard are ever sent to the server.  Torrents with an unsafe/missing path
+are still erased, but their data is left on disk."
+  (let* ((all-paths (mapcar #'cdr results))
+         (to-rm nil) (unsafe nil))
+    (dolist (r results)
+      (let ((reason (rtorred--rm-unsafe-reason (cdr r) root all-paths)))
+        (if reason (push (cons r reason) unsafe) (push r to-rm))))
+    (setq to-rm (nreverse to-rm) unsafe (nreverse unsafe))
+    (if (null to-rm)
         (progn
-          (message "rtorred: no safe data path found; erasing torrent%s only"
+          (message "rtorred: no safely deletable data; erasing torrent%s only"
                    (if (= (length results) 1) "" "s"))
-          (rtorred--erase-only (mapcar #'car results) buf))
+          (rtorred--erase-execute nil (mapcar #'car results) buf))
       (with-output-to-temp-buffer "*rtorred-erase*"
         (princ (format "Will run these %d command(s) on the rtorrent host \
-(via %s):\n\n" (length safe) (rtorred--execute-method)))
-        (dolist (r safe)
+(via %s):\n\n" (length to-rm) (rtorred--execute-method)))
+        (dolist (r to-rm)
           (princ (format "  rm -rf -- %s\n" (cdr r))))
         (when unsafe
-          (princ (format "\nNo usable path; erased WITHOUT deleting data (%d):\n"
-                         (length unsafe)))
-          (dolist (r unsafe)
-            (princ (format "  %s\n" (rtorred--hash-name (car r)))))))
+          (princ (format "\nErased WITHOUT deleting data (%d):\n" (length unsafe)))
+          (dolist (u unsafe)
+            (princ (format "  %-40s  (%s)\n"
+                           (rtorred--hash-name (car (car u))) (cdr u))))))
       (let ((delete (yes-or-no-p
                      (format "Send the %d command(s) shown above to delete data? "
-                             (length safe)))))
+                             (length to-rm)))))
         (quit-windows-on "*rtorred-erase*")
         (if delete
-            (rtorred--erase-with-data results buf)
-          (rtorred--erase-only (mapcar #'car results) buf))))))
+            (rtorred--erase-execute to-rm (mapcar (lambda (u) (car (car u))) unsafe) buf)
+          (rtorred--erase-execute nil (mapcar #'car results) buf))))))
 
-(defun rtorred--erase-with-data (results buf)
-  "For RESULTS (a list of (HASH . PATH)), `rm -rf' safe paths then erase all.
-The paths are already resolved and were shown for confirmation, so the
-exact commands run match what the user approved."
+(defun rtorred--erase-execute (to-rm erase-only buf)
+  "Delete data for TO-RM then erase, and erase ERASE-ONLY without deleting data.
+TO-RM is a list of (HASH . PATH) whose paths have already passed every
+safety guard; ERASE-ONLY is a list of hashes.  A failed `rm' does not
+proceed to erase, so the torrent stays put for a retry."
   (let ((exec (rtorred--execute-method)))
     (rtorred--run-batch
-     (mapcar
-      (lambda (r)
-        (let ((h (car r)) (path (cdr r)))
-          (lambda (k)
-            (if (rtorred--safe-rm-path-p path)
-                (rtorred-rpc-async
-                 exec (list "" "rm" "-rf" "--" path)
-                 (lambda (_) (rtorred--erase-one h k))
-                 ;; rm failed: do NOT erase -- keep the torrent so the whole
-                 ;; delete can be retried -- and mark it as a failure.
-                 (lambda (msg)
-                   (message "rtorred: rm failed for %s: %s" path msg)
-                   (funcall k h)))
-              (rtorred--erase-one h k)))))
-      results)
+     (append
+      (mapcar
+       (lambda (r)
+         (let ((h (car r)) (path (cdr r)))
+           (lambda (k)
+             (rtorred-rpc-async
+              exec (list "" "rm" "-rf" "--" path)
+              (lambda (_) (rtorred--erase-one h k))
+              (lambda (msg)
+                (message "rtorred: rm failed for %s: %s" path msg)
+                (funcall k h))))))
+       to-rm)
+      (mapcar (lambda (h) (lambda (k) (rtorred--erase-one h k))) erase-only))
      (lambda (failures) (rtorred--after-erase buf failures)))))
 
 (defun rtorred--erase-only (hashes buf)

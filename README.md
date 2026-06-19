@@ -225,11 +225,14 @@ remote files. rtorred feature-detects `execute` and hides the option when it's
 unavailable, and — before deleting anything — lists the exact `rm -rf -- <path>`
 commands it will run, dired-style, and asks you to confirm.
 
-The path comes only from `d.base_path` (always torrent-specific); rtorred never
-falls back to the (possibly shared) download directory, so it can't be tricked
-into deleting more than one torrent's data. Torrents with no usable path are
-erased without touching the disk. If an erase or `rm` fails (e.g. a server
-timeout), the affected torrents are **left marked** so you can simply retry.
+The path comes only from `d.base_path` (always torrent-specific) — never the
+(possibly shared) download directory. On top of that, every target is screened
+before anything is sent: rtorred refuses a path that **is the download root (or
+above it)**, that **contains another torrent's data**, or that is **shared by
+several torrents**. Anything that doesn't clear those guards is erased without
+touching the disk. So a single delete can never reach beyond one torrent's own
+files. If an erase or `rm` fails (e.g. a server timeout), the affected torrents
+are **left marked** so you can simply retry.
 
 Be aware: an rtorrent XML-RPC endpoint that exposes `execute` is effectively a
 remote code execution surface. Protect it (TLS, auth, network restrictions) and
