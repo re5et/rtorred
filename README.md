@@ -35,12 +35,39 @@ downloads that you act on with single-key commands.
 
 ## Installation
 
-Clone, then load it:
+### use-package + `:vc` (Emacs 30+, no package archive needed)
+
+Installs straight from this repo:
+
+```elisp
+(use-package rtorred
+  :vc (:url "https://github.com/re5et/rtorred" :rev :newest)
+  :commands (rtorred rtorred-detect-time-methods)
+  :custom (rtorred-rpc-url "https://myhost.example.com/RPC2"))
+```
+
+### use-package + MELPA
+
+Once the package is on [MELPA](https://melpa.org):
+
+```elisp
+(use-package rtorred
+  :ensure t
+  :commands (rtorred rtorred-detect-time-methods)
+  :custom (rtorred-rpc-url "~/.rtorrent.rpc"))
+```
+
+(Ensure MELPA is in `package-archives`.)
+
+### Manual
 
 ```elisp
 (add-to-list 'load-path "/path/to/rtorred")
 (require 'rtorred)
 ```
+
+`rtorred` and `rtorred-detect-time-methods` are autoloaded, so `M-x rtorred`
+works without an explicit `require`.
 
 ## Configuration
 

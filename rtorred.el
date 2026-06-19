@@ -1,4 +1,4 @@
-;;; rtorred.el --- Manage rtorrent downloads from Emacs -*- lexical-binding: t; -*-
+;;; rtorred.el --- Manage rtorrent downloads -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026
 
@@ -605,6 +605,7 @@ CUSTOMS is an alist of populated custom timestamp fields found."
         (goto-char (point-min)))
       (display-buffer (current-buffer)))))
 
+;;;###autoload
 (defun rtorred-detect-time-methods ()
   "Probe rtorrent and auto-configure the added/completed-time columns.
 
