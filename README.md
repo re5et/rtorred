@@ -234,6 +234,13 @@ touching the disk. So a single delete can never reach beyond one torrent's own
 files. If an erase or `rm` fails (e.g. a server timeout), the affected torrents
 are **left marked** so you can simply retry.
 
+To disable server-side data deletion entirely — erase only ever removes torrents
+from rtorrent, never touches disk — set:
+
+```elisp
+(setq rtorred-never-delete-data t)
+```
+
 Be aware: an rtorrent XML-RPC endpoint that exposes `execute` is effectively a
 remote code execution surface. Protect it (TLS, auth, network restrictions) and
 run rtorrent as an unprivileged user.

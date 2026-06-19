@@ -93,6 +93,13 @@ Common values are \"main\" (everything), \"started\", \"stopped\",
   "Seconds to wait for rtorrent to answer an RPC call."
   :type 'number)
 
+(defcustom rtorred-never-delete-data nil
+  "When non-nil, never delete a torrent's data from the server.
+Erase still removes torrents from rtorrent, but the \"also delete data\"
+option is never offered and no `rm' is ever sent -- files are always left
+on disk.  A hard safety switch above the per-path guards."
+  :type 'boolean)
+
 (defcustom rtorred-http-auth nil
   "HTTP basic-auth credentials for the HTTP(S) transport.
 
@@ -1492,9 +1499,11 @@ Each torrent is toggled based on its own current state."
 
 (defun rtorred--execute-method ()
   "Return the best available rtorrent execute method name, or nil.
-Used to delete data server-side; nil means the server has no `execute'
-command (locked down), so data deletion must be hidden."
-  (seq-find #'rtorred--method-available-p '("execute.throw" "execute2" "execute")))
+Used to delete data server-side.  Returns nil -- disabling all data
+deletion -- when `rtorred-never-delete-data' is set, or when the server
+has no `execute' command (locked down)."
+  (and (not rtorred-never-delete-data)
+       (seq-find #'rtorred--method-available-p '("execute.throw" "execute2" "execute"))))
 
 (defun rtorred--safe-rm-path-p (path)
   "Return non-nil if PATH passes the basic safety checks for `rm -rf'.
