@@ -232,7 +232,8 @@ typing.  nil redraws immediately (no deferral)."
 
 (defface rtorred-refreshing '((t :inherit success))
   "Face for the mode-line refresh icon while a refresh is in flight.
-The icon is hidden (a blank, fixed-width slot) when idle.")
+The icon appears only while auto-refresh is on -- in `shadow' when idle
+and this face while actually refreshing -- and is absent when off.")
 
 (defcustom rtorred-percent-gradient t
   "Whether to color the Done column by a red-to-green completion gradient.
@@ -1249,11 +1250,13 @@ the marks/flags (pruned to torrents that still exist)."
                   (number-to-string rtorred--total-count))))
     (setq mode-line-process
           (concat
-           ;; Reserve a fixed-width slot for the refresh icon so the line
-           ;; never shifts; show the icon only while actually refreshing.
-           " " (if rtorred--refreshing
-                   (propertize "↻" 'face 'rtorred-refreshing)
-                 " ")
+           ;; Show the icon only while auto-refresh is on; its colour changes
+           ;; while actually refreshing.  Present throughout an auto-refresh
+           ;; session (only the colour toggles), so the line doesn't shift.
+           (and rtorred--refresh-timer
+                (concat " " (propertize "↻" 'face (if rtorred--refreshing
+                                                       'rtorred-refreshing
+                                                     'shadow))))
            " " count
            (and rtorred--refresh-timer
                 (format " [auto:%ss]" rtorred-auto-refresh-interval))
