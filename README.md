@@ -175,8 +175,8 @@ Refreshing is non-blocking and pauses while a minibuffer command (e.g. a
 | `m` / `u` / `DEL` / `U` / `t` | mark / unmark / unmark-back / unmark-all / toggle |
 | `s` / `k` | start / stop |
 | `P` | pause / resume (toggles per torrent) |
-| `c` | hash-check |
-| `r` | clear error + re-announce (retry a tracker error) |
+| `c` | hash-check (explicit re-check) |
+| `r` | retry an error — smart: re-check hash / re-announce by error type (`C-u r` = always re-announce) |
 | `+` / `-` | raise / lower priority |
 | `d` / `x` | flag for erase / execute flagged erases |
 | `D` | erase marked-or-current now |
@@ -187,7 +187,10 @@ Refreshing is non-blocking and pauses while a minibuffer command (e.g. a
 | `q` | quit |
 
 Actions apply to the **marked** torrents, or the one at point if none are
-marked. Statuses are color-coded (seeding / leeching / stopped / hashing /
+marked. `r` (retry) clears a torrent's error and applies a remedy — by default
+it re-checks the hash for hash/data errors and re-announces for tracker errors
+(`rtorred-retry-smart`); `C-u r` always just re-announces, and `c` is an
+unconditional hash re-check. Statuses are color-coded (seeding / leeching / stopped / hashing /
 error), customizable via the `rtorred-faces` group.
 
 ### Detail view (`RET` / `i`)

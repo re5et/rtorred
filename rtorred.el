@@ -100,6 +100,13 @@ option is never offered and no `rm' is ever sent -- files are always left
 on disk.  A hard safety switch above the per-path guards."
   :type 'boolean)
 
+(defcustom rtorred-retry-smart t
+  "Whether \\[rtorred-retry] picks its remedy from the error message.
+When non-nil, retry re-checks the hash for hash/data errors and
+re-announces for tracker errors.  When nil, retry always just clears the
+message and re-announces.  A prefix argument forces the latter."
+  :type 'boolean)
+
 (defcustom rtorred-http-auth nil
   "HTTP basic-auth credentials for the HTTP(S) transport.
 
@@ -1472,29 +1479,52 @@ METHOD is a single-argument rtorrent command such as \"d.start\"."
   (interactive)
   (rtorred--priority-adjust -1))
 
-(defun rtorred-retry ()
-  "Clear the error on the marked-or-current torrent(s) and re-announce.
-Clears `d.message' and re-announces to the trackers -- the usual remedy
-for a transient tracker error (e.g. \"Unable to connect to UDP
-tracker\").  Harmless on healthy torrents (just a fresh announce)."
-  (interactive)
+(defun rtorred--hash-error-p (msg)
+  "Non-nil if error MSG looks like a hash/data problem (vs a tracker one)."
+  (and (stringp msg)
+       (let ((case-fold-search t))
+         (string-match-p "hash\\|chunk\\|unfinished\\|\\bfile\\b" msg))))
+
+(defun rtorred--retry-clear-then (h action k)
+  "Clear torrent H's message, then call one-arg method ACTION; continue with K.
+Passes H to K on failure."
+  (rtorred-rpc-async
+   "d.message.set" (list h "")
+   (lambda (_)
+     (rtorred-rpc-async
+      action (list h)
+      (lambda (_) (funcall k))
+      (lambda (msg) (message "rtorred: %s" msg) (funcall k h))))
+   (lambda (msg) (message "rtorred: %s" msg) (funcall k h))))
+
+(defun rtorred--retry-one (h smart k)
+  "Retry torrent H, continuing with K.
+When SMART, read H's `d.message' and re-check the hash for a hash/data
+error or re-announce for anything else; otherwise just re-announce."
+  (if (not smart)
+      (rtorred--retry-clear-then h "d.tracker_announce" k)
+    (rtorred-rpc-async
+     "d.message" (list h)
+     (lambda (msg)
+       (rtorred--retry-clear-then
+        h (if (rtorred--hash-error-p msg) "d.check_hash" "d.tracker_announce") k))
+     (lambda (_) (rtorred--retry-clear-then h "d.tracker_announce" k)))))
+
+(defun rtorred-retry (&optional plain)
+  "Retry the marked-or-current torrent(s) after an error.
+Clears the stale `d.message' and applies a remedy.  With `rtorred-retry-smart'
+\(the default) the remedy is chosen per torrent from its error: re-check
+the hash for a hash/data error, re-announce for a tracker error.  With a
+prefix arg PLAIN -- or when `rtorred-retry-smart' is nil -- it always
+just re-announces.  For an unconditional hash re-check, use \\[rtorred-check-hash]."
+  (interactive "P")
   (let ((hashes (rtorred--marked-or-current))
-        (buf (current-buffer)))
+        (buf (current-buffer))
+        (smart (and rtorred-retry-smart (not plain))))
     (if (null hashes)
         (message "rtorred: no torrent here")
       (rtorred--run-batch
-       (mapcar
-        (lambda (h)
-          (lambda (k)
-            (rtorred-rpc-async
-             "d.message.set" (list h "")
-             (lambda (_)
-               (rtorred-rpc-async
-                "d.tracker_announce" (list h)
-                (lambda (_) (funcall k))
-                (lambda (msg) (message "rtorred: %s" msg) (funcall k h))))
-             (lambda (msg) (message "rtorred: %s" msg) (funcall k h)))))
-        hashes)
+       (mapcar (lambda (h) (lambda (k) (rtorred--retry-one h smart k))) hashes)
        (lambda (failures) (rtorred--after-action buf failures))))))
 
 (defun rtorred-toggle-pause ()
