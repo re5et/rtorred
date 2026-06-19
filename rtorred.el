@@ -54,6 +54,7 @@
 (require 'color)
 (require 'xml)
 (require 'url)
+(require 'url-http)
 (require 'url-parse)
 (require 'auth-source)
 (require 'tabulated-list)
@@ -306,6 +307,10 @@ URL itself, then from `auth-source'."
 (defun rtorred--http-roundtrip (url xml)
   "POST XML to URL as an XML-RPC call and return the raw response body."
   (let ((url-request-method "POST")
+        ;; Disable keep-alive: with frequent polling, url.el reuses cached
+        ;; connections the server has since closed, failing with "Writing to
+        ;; process: invalid argument".  A fresh connection each call is robust.
+        (url-http-attempt-keepalives nil)
         (url-request-extra-headers
          (let ((auth (rtorred--http-auth-header url)))
            (append '(("Content-Type" . "text/xml"))
@@ -412,6 +417,9 @@ timeout ERRBACK is called with a message."
 (defun rtorred--http-roundtrip-async (url xml callback errback)
   "POST XML to URL as an XML-RPC call, delivering the reply body async."
   (let ((url-request-method "POST")
+        ;; See `rtorred--http-roundtrip': keep-alive reuse of server-closed
+        ;; connections is the source of dropped/leaked polls.
+        (url-http-attempt-keepalives nil)
         (url-request-extra-headers
          (let ((auth (rtorred--http-auth-header url)))
            (append '(("Content-Type" . "text/xml"))
@@ -421,14 +429,19 @@ timeout ERRBACK is called with a message."
         (url-retrieve
          url
          (lambda (status)
-           (if (plist-get status :error)
-               (funcall errback (format "%s" (plist-get status :error)))
-             (goto-char (point-min))
-             (let ((body (if (re-search-forward "\r?\n\r?\n" nil t)
-                             (buffer-substring-no-properties (point) (point-max))
-                           (buffer-string))))
-               (kill-buffer)
-               (funcall callback body))))
+           ;; Always kill the response buffer -- on the error path too, or
+           ;; failed polls leak a buffer (and a connection) each cycle.
+           (let ((err (plist-get status :error))
+                 (rbuf (current-buffer)))
+             (unwind-protect
+                 (if err
+                     (funcall errback (format "%s" err))
+                   (goto-char (point-min))
+                   (let ((body (if (re-search-forward "\r?\n\r?\n" nil t)
+                                   (buffer-substring-no-properties (point) (point-max))
+                                 (buffer-string))))
+                     (funcall callback body)))
+               (when (buffer-live-p rbuf) (kill-buffer rbuf)))))
          nil t t)
       (error (funcall errback (error-message-string err))))))
 
