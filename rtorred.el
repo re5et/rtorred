@@ -1497,30 +1497,70 @@ multi-file), falling back to `d.directory' when base_path is empty."
             rtorred--flags (cl-set-difference rtorred--flags hashes :test #'equal))
       (rtorred--refresh-async))))
 
-(defun rtorred--erase-with-data (hashes buf)
-  "Erase HASHES and delete their data server-side via `rm -rf'.
-Each path is validated; unsafe or empty paths are skipped (with a
-warning) and the torrent is erased without touching the disk."
+(defun rtorred--maybe-delete-data (hashes buf)
+  "Resolve the data paths for HASHES, then confirm deleting them.
+Gathers each torrent's on-disk path first so the confirmation can show
+exactly what will be removed."
+  (let ((results nil))
+    (rtorred--run-batch
+     (mapcar (lambda (h)
+               (lambda (k)
+                 (rtorred--resolve-data-path
+                  h (lambda (path) (push (cons h path) results) (funcall k)))))
+             hashes)
+     (lambda () (rtorred--confirm-delete-data (nreverse results) buf)))))
+
+(defun rtorred--confirm-delete-data (results buf)
+  "Show the exact `rm' commands for RESULTS, ask, then erase.
+RESULTS is a list of (HASH . PATH).  Paths that fail
+`rtorred--safe-rm-path-p' are never sent to the server; those torrents
+are still erased (data left on disk)."
+  (let ((safe (seq-filter (lambda (r) (rtorred--safe-rm-path-p (cdr r))) results))
+        (unsafe (seq-remove (lambda (r) (rtorred--safe-rm-path-p (cdr r))) results)))
+    (if (null safe)
+        ;; Nothing we can safely delete -- just erase, explaining why.
+        (progn
+          (message "rtorred: no safe data path found; erasing torrent%s only"
+                   (if (= (length results) 1) "" "s"))
+          (rtorred--erase-only (mapcar #'car results) buf))
+      (with-output-to-temp-buffer "*rtorred-erase*"
+        (princ (format "Will run these %d command(s) on the rtorrent host \
+(via %s):\n\n" (length safe) (rtorred--execute-method)))
+        (dolist (r safe)
+          (princ (format "  rm -rf -- %s\n" (cdr r))))
+        (when unsafe
+          (princ (format "\nNo usable path; erased WITHOUT deleting data (%d):\n"
+                         (length unsafe)))
+          (dolist (r unsafe)
+            (princ (format "  %s\n" (rtorred--hash-name (car r)))))))
+      (let ((delete (yes-or-no-p
+                     (format "Send the %d command(s) shown above to delete data? "
+                             (length safe)))))
+        (quit-windows-on "*rtorred-erase*")
+        (if delete
+            (rtorred--erase-with-data results buf)
+          (rtorred--erase-only (mapcar #'car results) buf))))))
+
+(defun rtorred--erase-with-data (results buf)
+  "For RESULTS (a list of (HASH . PATH)), `rm -rf' safe paths then erase all.
+The paths are already resolved and were shown for confirmation, so the
+exact commands run match what the user approved."
   (let ((exec (rtorred--execute-method)))
     (rtorred--run-batch
      (mapcar
-      (lambda (h)
-        (lambda (k)
-          (rtorred--resolve-data-path
-           h
-           (lambda (path)
-             (if (rtorred--safe-rm-path-p path)
-                 (rtorred-rpc-async
-                  exec (list "" "rm" "-rf" "--" path)
-                  (lambda (_) (rtorred--erase-one h k))
-                  (lambda (msg)
-                    (message "rtorred: rm failed for %s: %s" path msg)
-                    (rtorred--erase-one h k)))
-               (progn
-                 (message "rtorred: refusing unsafe path %S; erasing torrent only" path)
-                 (rtorred--erase-one h k)))))))
-      hashes)
-     (lambda () (rtorred--after-erase buf hashes)))))
+      (lambda (r)
+        (let ((h (car r)) (path (cdr r)))
+          (lambda (k)
+            (if (rtorred--safe-rm-path-p path)
+                (rtorred-rpc-async
+                 exec (list "" "rm" "-rf" "--" path)
+                 (lambda (_) (rtorred--erase-one h k))
+                 (lambda (msg)
+                   (message "rtorred: rm failed for %s: %s" path msg)
+                   (rtorred--erase-one h k)))
+              (rtorred--erase-one h k)))))
+      results)
+     (lambda () (rtorred--after-erase buf (mapcar #'car results))))))
 
 (defun rtorred--erase-only (hashes buf)
   "Erase HASHES from rtorrent, leaving their data on disk."
@@ -1546,9 +1586,10 @@ warning) and the torrent is erased without touching the disk."
       (when (yes-or-no-p
              (format "Erase %d torrent%s (%s)? "
                      n (if (= n 1) "" "s") (rtorred--format-name-list hashes)))
-        (if (and (rtorred--execute-method)
-                 (yes-or-no-p "Also delete their data on the server (rm -rf)? "))
-            (rtorred--erase-with-data hashes buf)
+        ;; If the server can delete data, gather the paths and show exactly
+        ;; what would run before asking; otherwise just erase.
+        (if (rtorred--execute-method)
+            (rtorred--maybe-delete-data hashes buf)
           (rtorred--erase-only hashes buf))))))
 
 (defun rtorred-flag-for-erase ()
