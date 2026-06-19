@@ -829,10 +829,10 @@ Uses a relative age when `rtorred-time-relative' is set, else
             (t (format-time-string rtorred-time-format n))))))
 
 (defun rtorred--fmt-count (key)
-  "Return a formatter rendering integer field KEY, blank when zero."
+  "Return a formatter rendering integer field KEY (blank only when absent)."
   (lambda (tr)
     (let ((n (rtorred--field tr key)))
-      (if (and (numberp n) (> n 0)) (number-to-string n) ""))))
+      (if (numberp n) (number-to-string n) ""))))
 
 (defun rtorred--fmt-name (tr)
   "Render the name of torrent TR."
@@ -2392,6 +2392,17 @@ blocking Emacs, and the buffer auto-refreshes on a timer (see
     (with-current-buffer buf
       (unless (derived-mode-p 'rtorred-mode)
         (rtorred-mode))
+      ;; Re-apply the column layout in case `rtorred-columns' or
+      ;; `rtorred-column-widths' changed since the buffer was built.  Clear
+      ;; the entries when it does, so the new format is not indexed against
+      ;; stale, differently-sized row vectors.
+      (let* ((fmt (rtorred--list-format (rtorred--active-columns)))
+             (sig (lambda (f) (mapcar (lambda (c) (list (nth 0 c) (nth 1 c)))
+                                      (append f nil)))))
+        (unless (equal (funcall sig fmt) (funcall sig tabulated-list-format))
+          (setq tabulated-list-format fmt
+                tabulated-list-entries nil)
+          (tabulated-list-init-header)))
       (tabulated-list-print)
       (rtorred--refresh-async))
     (pop-to-buffer-same-window buf)
