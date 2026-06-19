@@ -1379,20 +1379,25 @@ Rows flagged for erase are left untouched."
 ;;;; Actions
 
 (defun rtorred--run-batch (thunks done)
-  "Run async THUNKS, then call DONE once all have completed.
-Each thunk is a function of one argument, a continuation to invoke when
-its asynchronous work finishes."
+  "Run async THUNKS, then call DONE with the list of failures once all finish.
+Each thunk gets a continuation to call with no argument on success, or
+with the item's identifier on failure.  DONE receives the collected
+failure identifiers (nil if everything succeeded)."
   (if (null thunks)
-      (funcall done)
-    (let ((remaining (length thunks)))
+      (funcall done nil)
+    (let ((remaining (length thunks))
+          (failures nil))
       (dolist (thunk thunks)
         (funcall thunk
-                 (lambda ()
+                 (lambda (&optional failure)
+                   (when failure (push failure failures))
                    (setq remaining (1- remaining))
-                   (when (zerop remaining) (funcall done))))))))
+                   (when (zerop remaining) (funcall done failures))))))))
 
-(defun rtorred--after-action (buf)
-  "Refresh BUF after an action, if it is still alive."
+(defun rtorred--after-action (buf &optional failures)
+  "Refresh BUF after an action; note FAILURES if any."
+  (when failures
+    (message "rtorred: %d of the operations failed" (length failures)))
   (when (buffer-live-p buf)
     (with-current-buffer buf (rtorred--refresh-async))))
 
@@ -1409,9 +1414,9 @@ METHOD is a single-argument rtorrent command such as \"d.start\"."
                    (rtorred-rpc-async
                     method (list h)
                     (lambda (_) (funcall k))
-                    (lambda (msg) (message "rtorred: %s" msg) (funcall k)))))
+                    (lambda (msg) (message "rtorred: %s" msg) (funcall k h)))))
                hashes)
-       (lambda () (rtorred--after-action buf))))))
+       (lambda (failures) (rtorred--after-action buf failures))))))
 
 (defun rtorred-start ()
   "Start the marked-or-current torrent(s)."
@@ -1445,10 +1450,10 @@ METHOD is a single-argument rtorrent command such as \"d.start\"."
                 "d.priority.set"
                 (list h (max 0 (min 3 (+ (if (numberp cur) cur 2) delta))))
                 (lambda (_) (funcall k))
-                (lambda (msg) (message "rtorred: %s" msg) (funcall k))))
-             (lambda (msg) (message "rtorred: %s" msg) (funcall k)))))
+                (lambda (msg) (message "rtorred: %s" msg) (funcall k h))))
+             (lambda (msg) (message "rtorred: %s" msg) (funcall k h)))))
         hashes)
-       (lambda () (rtorred--after-action buf))))))
+       (lambda (failures) (rtorred--after-action buf failures))))))
 
 (defun rtorred-priority-up ()
   "Raise the priority of the marked-or-current torrent(s)."
@@ -1478,10 +1483,10 @@ Each torrent is toggled based on its own current state."
                (rtorred-rpc-async
                 (if (eq active 1) "d.pause" "d.resume") (list h)
                 (lambda (_) (funcall k))
-                (lambda (msg) (message "rtorred: %s" msg) (funcall k))))
-             (lambda (msg) (message "rtorred: %s" msg) (funcall k)))))
+                (lambda (msg) (message "rtorred: %s" msg) (funcall k h))))
+             (lambda (msg) (message "rtorred: %s" msg) (funcall k h)))))
         hashes)
-       (lambda () (rtorred--after-action buf))))))
+       (lambda (failures) (rtorred--after-action buf failures))))))
 
 ;;;; Erase (optionally with server-side data deletion)
 
@@ -1501,33 +1506,39 @@ Guards against the empty string, the root directory, and relative paths
        (not (string-match-p "\\`/+\\'" path))))
 
 (defun rtorred--resolve-data-path (hash callback)
-  "Resolve HASH's on-disk data path and pass it to CALLBACK.
-Uses `d.base_path' (the file for single-file torrents, the directory for
-multi-file), falling back to `d.directory' when base_path is empty."
+  "Pass HASH's on-disk data path (`d.base_path') to CALLBACK, or \"\".
+`d.base_path' is the file for single-file torrents and the torrent's own
+directory for multi-file ones -- always torrent-specific.
+
+It deliberately does NOT fall back to `d.directory': for a torrent that
+has never been opened, base_path is empty and `d.directory' is typically
+the *shared* download root, so deleting it would wipe every download.  An
+empty result means \"no usable path\", and the torrent is erased without
+touching the disk."
   (rtorred-rpc-async
    "d.base_path" (list hash)
-   (lambda (path)
-     (if (and (stringp path) (> (length path) 0))
-         (funcall callback path)
-       (rtorred-rpc-async "d.directory" (list hash)
-                          callback (lambda (_) (funcall callback "")))))
-   (lambda (_)
-     (rtorred-rpc-async "d.directory" (list hash)
-                        callback (lambda (_) (funcall callback ""))))))
+   (lambda (path) (funcall callback (if (stringp path) path "")))
+   (lambda (_) (funcall callback ""))))
 
 (defun rtorred--erase-one (hash k)
-  "Erase HASH from rtorrent (leaving data), then call continuation K."
+  "Erase HASH from rtorrent (leaving data); call K, passing HASH on failure."
   (rtorred-rpc-async
    "d.erase" (list hash)
    (lambda (_) (funcall k))
-   (lambda (msg) (message "rtorred: erase failed: %s" msg) (funcall k))))
+   (lambda (msg) (message "rtorred: erase failed: %s" msg) (funcall k hash))))
 
-(defun rtorred--after-erase (buf hashes)
-  "Drop HASHES from marks/flags and refresh BUF after erasing."
+(defun rtorred--after-erase (buf failures)
+  "Refresh BUF after an erase batch, leaving FAILURES marked for retry.
+FAILURES is the list of hashes whose rm or erase failed.  Erased
+torrents are gone (their marks vanish with them); the failures are
+re-marked so you can simply retry.  Flags are cleared regardless."
   (when (buffer-live-p buf)
     (with-current-buffer buf
-      (setq rtorred--marks (cl-set-difference rtorred--marks hashes :test #'equal)
-            rtorred--flags (cl-set-difference rtorred--flags hashes :test #'equal))
+      (setq rtorred--marks (copy-sequence failures)
+            rtorred--flags nil)
+      (when failures
+        (message "rtorred: %d torrent(s) failed; left marked for retry"
+                 (length failures)))
       (rtorred--refresh-async))))
 
 (defun rtorred--maybe-delete-data (hashes buf)
@@ -1541,7 +1552,7 @@ exactly what will be removed."
                  (rtorred--resolve-data-path
                   h (lambda (path) (push (cons h path) results) (funcall k)))))
              hashes)
-     (lambda () (rtorred--confirm-delete-data (nreverse results) buf)))))
+     (lambda (_failures) (rtorred--confirm-delete-data (nreverse results) buf)))))
 
 (defun rtorred--confirm-delete-data (results buf)
   "Show the exact `rm' commands for RESULTS, ask, then erase.
@@ -1588,18 +1599,20 @@ exact commands run match what the user approved."
                 (rtorred-rpc-async
                  exec (list "" "rm" "-rf" "--" path)
                  (lambda (_) (rtorred--erase-one h k))
+                 ;; rm failed: do NOT erase -- keep the torrent so the whole
+                 ;; delete can be retried -- and mark it as a failure.
                  (lambda (msg)
                    (message "rtorred: rm failed for %s: %s" path msg)
-                   (rtorred--erase-one h k)))
+                   (funcall k h)))
               (rtorred--erase-one h k)))))
       results)
-     (lambda () (rtorred--after-erase buf (mapcar #'car results))))))
+     (lambda (failures) (rtorred--after-erase buf failures)))))
 
 (defun rtorred--erase-only (hashes buf)
   "Erase HASHES from rtorrent, leaving their data on disk."
   (rtorred--run-batch
    (mapcar (lambda (h) (lambda (k) (rtorred--erase-one h k))) hashes)
-   (lambda () (rtorred--after-erase buf hashes))))
+   (lambda (failures) (rtorred--after-erase buf failures))))
 
 (defun rtorred--format-name-list (hashes)
   "Format HASHES as a short, human-readable list of torrent names."
@@ -1865,7 +1878,7 @@ aspect whose multicall fails is left nil."
             "p.multicall" lead rtorred--peer-fields
             (lambda (rows) (plist-put data :peers rows) (funcall k))
             (lambda (_) (funcall k)))))
-        (lambda () (funcall callback data)))))))
+        (lambda (_failures) (funcall callback data)))))))
 
 (defun rtorred--file-priority-label (p)
   "Label rtorrent file priority P (0 off, 1 normal, 2 high)."

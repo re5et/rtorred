@@ -222,9 +222,14 @@ auto-refresh interval, and any active filters.
 "Erase + delete data" works by asking rtorrent to `rm -rf` the data on its own
 host via the `execute` command — the only way for a remote client to remove
 remote files. rtorred feature-detects `execute` and hides the option when it's
-unavailable, refuses obviously unsafe paths, and — before deleting anything —
-lists the exact `rm -rf -- <path>` commands it will run, dired-style, and asks
-you to confirm.
+unavailable, and — before deleting anything — lists the exact `rm -rf -- <path>`
+commands it will run, dired-style, and asks you to confirm.
+
+The path comes only from `d.base_path` (always torrent-specific); rtorred never
+falls back to the (possibly shared) download directory, so it can't be tricked
+into deleting more than one torrent's data. Torrents with no usable path are
+erased without touching the disk. If an erase or `rm` fails (e.g. a server
+timeout), the affected torrents are **left marked** so you can simply retry.
 
 Be aware: an rtorrent XML-RPC endpoint that exposes `execute` is effectively a
 remote code execution surface. Protect it (TLS, auth, network restrictions) and
