@@ -116,9 +116,9 @@ rtorred-refresh-methods` forgets it, e.g. after the server is upgraded.)
 ### Columns and sorting
 
 ```elisp
-;; which columns, in order. Available keys: name size done down up uploaded
-;; ratio peers seeds status added completed directory priority
-(setq rtorred-columns '(name size done up ratio peers seeds status added))
+;; which columns, in order. Available keys: name size done down up eta
+;; uploaded ratio peers seeds status added completed directory priority
+(setq rtorred-columns '(name size done down eta ratio peers seeds status added))
 
 ;; override individual column widths (Name flexes regardless)
 (setq rtorred-column-widths '((status . 11) (ratio . 6)))

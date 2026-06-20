@@ -132,7 +132,7 @@ The lookup order is: this variable, then the URL, then `auth-source'."
   "Columns shown in the rtorred buffer, in order, by key.
 
 Each key must name a column defined in `rtorred--all-columns'; the
-available keys are: name, size, done, down, up, uploaded, ratio,
+available keys are: name, size, done, down, up, eta, uploaded, ratio,
 peers, seeds, status, added, completed, directory, priority.  Reorder or trim this
 list to taste -- adding a brand-new column means defining it in
 `rtorred--all-columns' and adding its key here."
@@ -834,6 +834,43 @@ Uses a relative age when `rtorred-time-relative' is set, else
     (let ((n (rtorred--field tr key)))
       (if (numberp n) (number-to-string n) ""))))
 
+(defun rtorred--format-eta (seconds)
+  "Format SECONDS as a compact duration like \"3h15m\" or \"2d4h\"."
+  (cond
+   ((< seconds 60) (format "%ds" seconds))
+   ((< seconds 3600) (format "%dm" (/ seconds 60)))
+   ((< seconds 86400) (format "%dh%dm" (/ seconds 3600) (% (/ seconds 60) 60)))
+   ((< seconds 8640000) (format "%dd%dh" (/ seconds 86400) (% (/ seconds 3600) 24)))
+   (t "∞")))
+
+(defun rtorred--eta-seconds (tr)
+  "Return TR's estimated seconds remaining, or `most-positive-fixnum'.
+The sentinel covers completed and stalled (not-downloading) torrents so
+they sort to the end."
+  (let* ((size (rtorred--field tr 'size))
+         (done (rtorred--field tr 'done))
+         (rate (rtorred--field tr 'down))
+         (left (and (numberp size) (numberp done) (- size done))))
+    (if (and left (> left 0) (numberp rate) (> rate 0))
+        (/ left rate)
+      most-positive-fixnum)))
+
+(defun rtorred--fmt-eta (tr)
+  "Render TR's estimated time remaining (blank when complete, ∞ when stalled)."
+  (let* ((size (rtorred--field tr 'size))
+         (done (rtorred--field tr 'done))
+         (rate (rtorred--field tr 'down))
+         (left (and (numberp size) (numberp done) (- size done))))
+    (cond
+     ((or (null left) (<= left 0)) "")
+     ((or (null rate) (<= rate 0)) "∞")
+     (t (rtorred--format-eta (/ left rate))))))
+
+(defun rtorred--eta-sorter (a b)
+  "Sort entries A and B by estimated time remaining (soonest first)."
+  (< (rtorred--eta-seconds (cdr (assoc (car a) rtorred--torrents)))
+     (rtorred--eta-seconds (cdr (assoc (car b) rtorred--torrents)))))
+
 (defun rtorred--fmt-name (tr)
   "Render the name of torrent TR."
   (or (rtorred--field tr 'name) ""))
@@ -943,6 +980,10 @@ numerically by that field)."
     (down      . (:label "Down"      :width 11 :align right
                   :fields ((down . "d.down.rate"))
                   :format ,(rtorred--fmt-rate 'down) :sort down))
+    (eta       . (:label "ETA"       :width 7 :align right
+                  :fields ((size . "d.size_bytes") (done . "d.bytes_done")
+                           (down . "d.down.rate"))
+                  :format ,#'rtorred--fmt-eta :sort rtorred--eta-sorter))
     (up        . (:label "Up"        :width 11 :align right
                   :fields ((up . "d.up.rate"))
                   :format ,(rtorred--fmt-rate 'up) :sort up))
@@ -1107,7 +1148,8 @@ Coerces string epoch/values (e.g. from custom fields) to numbers."
   (let ((s (plist-get (cdr col) :sort)))
     (cond ((null s) nil)
           ((eq s t) t)
-          ((symbolp s) (rtorred--num-sorter s))
+          ((functionp s) s)                       ; a custom sort predicate
+          ((symbolp s) (rtorred--num-sorter s))   ; a field key
           (t s))))
 
 (defun rtorred--column-width (col)
