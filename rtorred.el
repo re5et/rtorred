@@ -89,6 +89,18 @@ Common values are \"main\" (everything), \"started\", \"stopped\",
 \"complete\", and \"incomplete\"."
   :type 'string)
 
+(defcustom rtorred-directory "~/"
+  "Directory used as `default-directory' in rtorred buffers.
+
+rtorred lists rtorrent's downloads, not a directory's contents, so its
+buffer needs no particular `default-directory'.  Pinning a fixed local one
+keeps the buffer from inheriting the directory of whatever buffer was
+current when you ran \\[rtorred]; inheriting a remote (TRAMP) directory in
+particular can make buffer- or project-switching commands hang trying to
+reach the remote.  Set to nil to inherit the current directory instead."
+  :type '(choice (const :tag "Inherit current directory" nil)
+                 (directory :tag "Directory")))
+
 (defcustom rtorred-rpc-timeout 10
   "Seconds to wait for rtorrent to answer an RPC call."
   :type 'number)
@@ -2417,6 +2429,10 @@ blocking Emacs, and the buffer auto-refreshes on a timer (see
   ;; space before the first column (the `dired'/`package-menu' convention).
   (setq tabulated-list-padding 2)
   (setq-local truncate-lines t)
+  ;; Pin `default-directory' so the global list buffer never carries a stray
+  ;; (e.g. remote) directory inherited at creation.  See `rtorred-directory'.
+  (when rtorred-directory
+    (setq default-directory (expand-file-name rtorred-directory)))
   (when rtorred-hl-line (hl-line-mode 1))
   (setq-local revert-buffer-function #'rtorred-revert)
   (add-hook 'kill-buffer-hook #'rtorred--stop-timer nil t)
