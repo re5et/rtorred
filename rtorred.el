@@ -1296,6 +1296,14 @@ the marks/flags (pruned to torrents that still exist)."
 (defvar-local rtorred--pending-render nil
   "Latest (TORRENTS . COLS) awaiting a deferred render, or nil.")
 
+(defvar-local rtorred--refresh-function nil
+  "Buffer-local function (no args) the auto-refresh timer calls to refresh.
+Set per mode -- the list view refreshes the whole list, the detail view
+re-fetches that one download -- so the timer machinery is shared.")
+
+(defvar-local rtorred--mode-line-function nil
+  "Buffer-local function (no args) that updates this buffer's mode-line.")
+
 (defun rtorred--mode-line ()
   "Update the rtorred mode-line indicator (count, refresh/auto state, filters)."
   (let* ((shown (length rtorred--torrents))
@@ -1391,8 +1399,8 @@ re-rendering ~1000 rows nobody is looking at)."
              ;; reading -- it would reprint the buffer out from under it.
              (not (active-minibuffer-window)))
     (with-current-buffer buf
-      (unless rtorred--refreshing
-        (rtorred--refresh-async)))))
+      (when (and rtorred--refresh-function (not rtorred--refreshing))
+        (funcall rtorred--refresh-function)))))
 
 (defun rtorred--stop-timer ()
   "Cancel this buffer's auto-refresh and deferred-render timers, if any."
@@ -1424,7 +1432,7 @@ re-rendering ~1000 rows nobody is looking at)."
       (setq-local rtorred-auto-refresh-interval 3))
     (rtorred--start-timer)
     (message "rtorred: auto-refresh on (%ss)" rtorred-auto-refresh-interval))
-  (rtorred--mode-line))
+  (when rtorred--mode-line-function (funcall rtorred--mode-line-function)))
 
 ;;;; Marking
 
@@ -2240,9 +2248,15 @@ snapshot taken when the view was opened."
       rtorred-detail--torrent))
 
 (defun rtorred-detail--render (torrent data)
-  "Render the detail buffer for TORRENT (a field alist) and DATA (a plist)."
+  "Render the detail buffer for TORRENT (a field alist) and DATA (a plist).
+Preserves point and scroll position (by line) so an auto-refresh redraw
+doesn't yank the view to the top."
   (let ((inhibit-read-only t)
-        (name (or (cdr (assq 'name torrent)) "(unknown)")))
+        (name (or (cdr (assq 'name torrent)) "(unknown)"))
+        (pt-line (line-number-at-pos (point)))
+        (win (get-buffer-window (current-buffer)))
+        (start-line nil))
+    (when win (setq start-line (line-number-at-pos (window-start win))))
     (erase-buffer)
     (insert (propertize name 'face 'bold) "\n"
             (make-string 60 ?─) "\n\n")
@@ -2250,17 +2264,41 @@ snapshot taken when the view was opened."
     (rtorred-detail--files (plist-get data :files))
     (rtorred-detail--trackers (plist-get data :trackers))
     (rtorred-detail--peers (plist-get data :peers))
-    (goto-char (point-min))))
+    (goto-char (point-min))
+    (forward-line (1- pt-line))
+    (when (and win start-line)
+      (set-window-start
+       win (save-excursion (goto-char (point-min)) (forward-line (1- start-line)) (point))
+       t))))
+
+(defun rtorred-detail--mode-line ()
+  "Update the detail buffer's refresh/auto-refresh mode-line indicator.
+Mirrors the list view: the icon shows only while auto-refresh is on and
+colours up while a refresh is in flight."
+  (setq mode-line-process
+        (concat
+         (and rtorred--refresh-timer
+              (concat " " (propertize "↻" 'face (if rtorred--refreshing
+                                                     'rtorred-refreshing
+                                                   'shadow))))
+         (and rtorred--refresh-timer
+              (format " [auto:%ss]" rtorred-auto-refresh-interval))))
+  (force-mode-line-update))
 
 (defun rtorred-detail--revert (&optional _arg _noconfirm)
-  "Re-fetch and re-render this detail buffer."
-  (let ((buf (current-buffer)))
-    (rtorred--detail-fetch
-     rtorred-detail--hash
-     (lambda (data)
-       (when (buffer-live-p buf)
-         (with-current-buffer buf
-           (rtorred-detail--render (rtorred-detail--current-torrent) data)))))))
+  "Re-fetch and re-render this detail buffer, guarding against overlap."
+  (unless rtorred--refreshing
+    (setq rtorred--refreshing t)
+    (rtorred-detail--mode-line)
+    (let ((buf (current-buffer)))
+      (rtorred--detail-fetch
+       rtorred-detail--hash
+       (lambda (data)
+         (when (buffer-live-p buf)
+           (with-current-buffer buf
+             (setq rtorred--refreshing nil)
+             (rtorred-detail--render (rtorred-detail--current-torrent) data)
+             (rtorred-detail--mode-line))))))))
 
 (defun rtorred-detail--refresh-buf (buf)
   "Re-render detail buffer BUF if it is still live."
@@ -2322,13 +2360,20 @@ snapshot taken when the view was opened."
 
 \\<rtorred-detail-mode-map>On a file line, \\[rtorred-detail-file-priority-up] / \
 \\[rtorred-detail-file-priority-down] raise/lower its priority; on a tracker line, \
-\\[rtorred-detail-toggle-tracker] toggles it.  Refresh with \\[revert-buffer], \
-quit with \\[quit-window]."
-  (setq-local revert-buffer-function #'rtorred-detail--revert))
+\\[rtorred-detail-toggle-tracker] toggles it.  Refresh with \\[revert-buffer]; \
+the view also auto-refreshes on a timer (toggle with \
+\\[rtorred-toggle-auto-refresh]).  Quit with \\[quit-window]."
+  (setq-local revert-buffer-function #'rtorred-detail--revert)
+  (setq-local rtorred--refresh-function #'rtorred-detail--revert)
+  (setq-local rtorred--mode-line-function #'rtorred-detail--mode-line)
+  (add-hook 'kill-buffer-hook #'rtorred--stop-timer nil t)
+  (rtorred--start-timer)
+  (rtorred-detail--mode-line))
 
 (keymap-set rtorred-detail-mode-map "+" #'rtorred-detail-file-priority-up)
 (keymap-set rtorred-detail-mode-map "-" #'rtorred-detail-file-priority-down)
 (keymap-set rtorred-detail-mode-map "t" #'rtorred-detail-toggle-tracker)
+(keymap-set rtorred-detail-mode-map "G" #'rtorred-toggle-auto-refresh)
 
 (defun rtorred-detail ()
   "Open a detail view for the torrent at point."
@@ -2435,6 +2480,8 @@ blocking Emacs, and the buffer auto-refreshes on a timer (see
     (setq default-directory (expand-file-name rtorred-directory)))
   (when rtorred-hl-line (hl-line-mode 1))
   (setq-local revert-buffer-function #'rtorred-revert)
+  (setq-local rtorred--refresh-function #'rtorred--refresh-async)
+  (setq-local rtorred--mode-line-function #'rtorred--mode-line)
   (add-hook 'kill-buffer-hook #'rtorred--stop-timer nil t)
   ;; Flex the Name column to the window width, and keep it sized on resize.
   (add-hook 'window-configuration-change-hook #'rtorred--adjust-name-width nil t)

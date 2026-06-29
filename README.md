@@ -207,6 +207,10 @@ interactive:
 - on a **tracker** line, `t` enables/disables it;
 - `g` refreshes, `q` quits.
 
+Like the list view, the detail buffer auto-refreshes on a timer (same
+`rtorred-auto-refresh-interval`; toggle per-buffer with `G`), preserving point
+and scroll position across each redraw.
+
 ### Filtering (`/` prefix)
 
 | Key | Filter |
