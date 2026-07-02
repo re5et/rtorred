@@ -2495,20 +2495,19 @@ blocking Emacs, and the buffer auto-refreshes on a timer (see
   (interactive)
   (let ((buf (get-buffer-create "*rtorred*")))
     (with-current-buffer buf
-      (unless (derived-mode-p 'rtorred-mode)
-        (rtorred-mode))
-      ;; Re-apply the column layout in case `rtorred-columns' or
-      ;; `rtorred-column-widths' changed since the buffer was built.  Clear
-      ;; the entries when it does, so the new format is not indexed against
-      ;; stale, differently-sized row vectors.
-      (let* ((fmt (rtorred--list-format (rtorred--active-columns)))
-             (sig (lambda (f) (mapcar (lambda (c) (list (nth 0 c) (nth 1 c)))
-                                      (append f nil)))))
-        (unless (equal (funcall sig fmt) (funcall sig tabulated-list-format))
-          (setq tabulated-list-format fmt
-                tabulated-list-entries nil)
-          (tabulated-list-init-header)))
-      (tabulated-list-print)
+      (if (not (derived-mode-p 'rtorred-mode))
+          ;; Fresh buffer: set up the mode and print the (empty) structure.
+          (progn (rtorred-mode) (tabulated-list-print))
+        ;; Existing buffer: keep its rows and just refresh in place.  Rebuild
+        ;; only when the *set* of columns changed -- compare labels, not
+        ;; widths, since the Name column flexes to the window at runtime.
+        (let ((labels (lambda (f) (mapcar #'car (append f nil))))
+              (want (rtorred--list-format (rtorred--active-columns))))
+          (unless (equal (funcall labels want) (funcall labels tabulated-list-format))
+            (setq tabulated-list-format want
+                  tabulated-list-entries nil)   ; column set changed: drop stale rows
+            (tabulated-list-init-header)
+            (tabulated-list-print))))
       (rtorred--refresh-async))
     (pop-to-buffer-same-window buf)
     ;; Size the Name column now that the buffer is in a window.
