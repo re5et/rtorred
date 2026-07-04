@@ -1265,6 +1265,11 @@ the marks/flags (pruned to torrents that still exist)."
             rtorred--flags (cl-intersection rtorred--flags present :test #'equal)))
     (setq tabulated-list-entries
           (mapcar (lambda (tr) (rtorred--entry tr cols)) visible))
+    ;; If point sits past the last row (the trailing empty line),
+    ;; `tabulated-list-print' finds no id to restore and jumps to the top.
+    ;; Nudge point onto the nearest real entry first so it stays put.
+    (while (and (null (tabulated-list-get-id)) (not (bobp)))
+      (forward-line -1))
     (tabulated-list-print t)
     ;; A fresh print blanks the padding, so only re-tag when something is
     ;; marked (saves an O(n) pass on the common no-marks refresh).
