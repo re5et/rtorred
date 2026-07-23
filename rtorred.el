@@ -467,35 +467,60 @@ timeout ERRBACK is called with a message."
       (process-send-string proc request))))
 
 (defun rtorred--http-roundtrip-async (url xml callback errback)
-  "POST XML to URL as an XML-RPC call, delivering the reply body async."
-  (let ((url-request-method "POST")
-        ;; See `rtorred--http-roundtrip': keep-alive reuse of server-closed
-        ;; connections is the source of dropped/leaked polls.
-        (url-http-attempt-keepalives nil)
-        (url-request-extra-headers
-         (let ((auth (rtorred--http-auth-header url)))
-           (append '(("Content-Type" . "text/xml"))
-                   (and auth (list auth)))))
-        (url-request-data (encode-coding-string xml 'utf-8)))
+  "POST XML to URL as an XML-RPC call, delivering the reply body async.
+Exactly one of CALLBACK/ERRBACK is invoked, exactly once: url.el is
+not trustworthy about invoking its callback on TLS or connection
+failures, and a poll that never completes would otherwise leave the
+caller's in-flight flag set forever (a permanently \"stuck
+refreshing\" buffer).  A watchdog timer fires ERRBACK after
+`rtorred-rpc-timeout' and any late url.el delivery is dropped."
+  (let* ((url-request-method "POST")
+         ;; See `rtorred--http-roundtrip': keep-alive reuse of server-closed
+         ;; connections is the source of dropped/leaked polls.
+         (url-http-attempt-keepalives nil)
+         (url-request-extra-headers
+          (let ((auth (rtorred--http-auth-header url)))
+            (append '(("Content-Type" . "text/xml"))
+                    (and auth (list auth)))))
+         (url-request-data (encode-coding-string xml 'utf-8))
+         (done nil) (watchdog nil) (reply-buf nil)
+         (finish (lambda (fn &rest args)
+                   (unless done
+                     (setq done t)
+                     (when (timerp watchdog) (cancel-timer watchdog))
+                     (apply fn args)))))
     (condition-case err
-        (url-retrieve
-         url
-         (lambda (status)
-           ;; Always kill the response buffer -- on the error path too, or
-           ;; failed polls leak a buffer (and a connection) each cycle.
-           (let ((err (plist-get status :error))
-                 (rbuf (current-buffer)))
-             (unwind-protect
-                 (if err
-                     (funcall errback (format "%s" err))
-                   (goto-char (point-min))
-                   (let ((body (if (re-search-forward "\r?\n\r?\n" nil t)
-                                   (buffer-substring-no-properties (point) (point-max))
-                                 (buffer-string))))
-                     (funcall callback body)))
-               (when (buffer-live-p rbuf) (kill-buffer rbuf)))))
-         nil t t)
-      (error (funcall errback (error-message-string err))))))
+        (setq reply-buf
+              (url-retrieve
+               url
+               (lambda (status)
+                 ;; Always kill the response buffer -- on the error path too,
+                 ;; or failed polls leak a buffer (+ connection) each cycle.
+                 (let ((err (plist-get status :error))
+                       (rbuf (current-buffer)))
+                   (unwind-protect
+                       (if err
+                           (funcall finish errback (format "%s" err))
+                         (goto-char (point-min))
+                         (let ((body (if (re-search-forward "\r?\n\r?\n" nil t)
+                                         (buffer-substring-no-properties (point) (point-max))
+                                       (buffer-string))))
+                           (funcall finish callback body)))
+                     (when (buffer-live-p rbuf) (kill-buffer rbuf)))))
+               nil t t))
+      (error (funcall finish errback (error-message-string err))))
+    (unless done
+      (setq watchdog
+            (run-at-time
+             rtorred-rpc-timeout nil
+             (lambda ()
+               ;; Tear the connection down so url.el can't deliver late into
+               ;; a kill-buffer'd reply buffer, then report the timeout.
+               (when (buffer-live-p reply-buf)
+                 (when-let* ((proc (get-buffer-process reply-buf)))
+                   (delete-process proc))
+                 (kill-buffer reply-buf))
+               (funcall finish errback "timed out")))))))
 
 (defun rtorred--rpc-call-async (xml callback errback)
   "Send XML asynchronously, dispatching on `rtorred-rpc-url'.
@@ -2391,7 +2416,13 @@ the view also auto-refreshes on a timer (toggle with \
       (let ((buf (get-buffer-create
                   (format "*rtorred-detail: %s*" (or (cdr (assq 'name torrent)) hash)))))
         (with-current-buffer buf
-          (rtorred-detail-mode)
+          ;; Only init the mode on a fresh buffer: re-running a derived mode
+          ;; goes through kill-all-local-variables, which wipes the local
+          ;; rtorred--refresh-timer WITHOUT cancelling it -- the old timer
+          ;; keeps firing from timer-list while the mode body starts a second
+          ;; one, leaking a duplicate on every re-open of the same torrent.
+          (unless (derived-mode-p 'rtorred-detail-mode)
+            (rtorred-detail-mode))
           (setq rtorred-detail--hash hash
                 rtorred-detail--torrent torrent
                 rtorred-detail--source source)
