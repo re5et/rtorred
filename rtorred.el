@@ -1755,6 +1755,25 @@ Cached per connection; used to refuse deleting the shared root."
        (setq rtorred--download-root-cache (cons rtorred-rpc-url nil))
        (funcall callback nil)))))
 
+(defun rtorred--reconstruct-base-path (dir name multi-file)
+  "Rebuild what `d.base_path' would say, from DIR, NAME and MULTI-FILE.
+Returns a torrent-specific path, or nil when one can't be established.
+
+`d.directory' is NOT interchangeable with `d.base_path'.  For a
+multi-file torrent they agree -- the directory IS the torrent's own
+folder -- but for a single-file torrent `d.directory' is the folder
+CONTAINING the file, which is shared with whatever else lives there.
+Deleting that folder would take unrelated data with it, so reconstruct
+the file path instead.  The multi-file case is checked rather than
+assumed: if the directory's basename isn't the torrent name, it is some
+shared parent and we refuse it."
+  (when (and (stringp dir) (not (string-empty-p dir))
+             (stringp name) (not (string-empty-p name)))
+    (if multi-file
+        (when (string= (file-name-nondirectory (directory-file-name dir)) name)
+          (directory-file-name dir))
+      (expand-file-name name dir))))
+
 (defun rtorred--resolve-data-path (hash callback)
   "Pass HASH's on-disk data path to CALLBACK.
 CALLBACK receives one of:
@@ -1776,26 +1795,35 @@ only maintains it for OPEN torrents.  Closing a completed torrent blanks
 it, which used to make every closed torrent undeletable (its data left
 behind as an orphan) even though the data was plainly there.
 
-So an empty base_path falls back to `d.directory', which for a closed
-torrent still names its own directory.  The fallback is tagged rather
-than returned bare because `d.directory' is NOT always torrent-specific:
-for a torrent that never downloaded anything it is the shared download
-root.  Callers must apply the FROM-DIRECTORY guard, which refuses any
-fallback path that isn't provably inside a known root."
+An empty base_path therefore falls back to rebuilding the path from
+`d.directory' + `d.name' + `d.is_multi_file' (see
+`rtorred--reconstruct-base-path').  The result is tagged rather than
+returned bare: callers must apply the FROM-DIRECTORY guard, which
+refuses any reconstructed path not provably inside a known root --
+belt and braces against a torrent whose directory is the shared root."
   (rtorred-rpc-async
    "d.base_path" (list hash)
    (lambda (path)
      (if (and (stringp path) (not (string-empty-p path)))
          (funcall callback path)
-       ;; Empty base_path: closed torrent (or never opened).  Ask where
-       ;; rtorrent thinks its data lives.
-       (rtorred-rpc-async
-        "d.directory" (list hash)
-        (lambda (dir)
-          (funcall callback (if (and (stringp dir) (not (string-empty-p dir)))
-                                (cons 'directory dir)
-                              "")))
-        (lambda (msg) (funcall callback (cons 'error msg))))))
+       ;; Empty base_path: rtorrent hasn't opened this torrent since its
+       ;; last restart.  Rebuild the path from persistent fields.
+       (let ((fail (lambda (msg) (funcall callback (cons 'error msg)))))
+         (rtorred-rpc-async
+          "d.directory" (list hash)
+          (lambda (dir)
+            (rtorred-rpc-async
+             "d.is_multi_file" (list hash)
+             (lambda (multi)
+               (rtorred-rpc-async
+                "d.name" (list hash)
+                (lambda (name)
+                  (let ((rebuilt (rtorred--reconstruct-base-path
+                                  dir name (equal multi 1))))
+                    (funcall callback (if rebuilt (cons 'directory rebuilt) ""))))
+                fail))
+             fail))
+          fail))))
    (lambda (msg) (funcall callback (cons 'error msg)))))
 
 (defun rtorred--erase-one (hash k)
