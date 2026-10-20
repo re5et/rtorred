@@ -1711,14 +1711,25 @@ This is the first of several layers -- see `rtorred--rm-unsafe-reason'."
 Compares whole path components (so /a/b is not an ancestor of /a/bc)."
   (string-prefix-p (file-name-as-directory a) (file-name-as-directory b)))
 
-(defun rtorred--rm-unsafe-reason (path root all-paths)
+(defun rtorred--rm-unsafe-reason (path root all-paths &optional from-directory)
   "Return a human reason PATH is unsafe to `rm -rf', or nil if it is safe.
 ROOT is the shared download directory (or nil); ALL-PATHS is every target
-path in the batch.  These layers ensure a delete can never reach beyond a
-single torrent's own data, even if path resolution misbehaves."
+path in the batch.  FROM-DIRECTORY marks a path that came from the
+`d.directory' fallback rather than `d.base_path' (see
+`rtorred--resolve-data-path'), which earns one extra layer: such a path
+must be provably INSIDE a known root.  `d.directory' is the shared root
+itself for a torrent that never downloaded anything, so without a known
+root we cannot tell a torrent's own directory from the root -- and
+`rm -rf' on the root would wipe every download.
+
+These layers ensure a delete can never reach beyond a single torrent's
+own data, even if path resolution misbehaves."
   (cond
    ((not (rtorred--safe-rm-path-p path)) "no usable path")
    ((and root (rtorred--path-ancestor-p path root)) "the shared download root")
+   ((and from-directory
+         (not (and root (rtorred--path-ancestor-p root path))))
+    "closed torrent, and its directory is not provably inside the download root")
    ((> (seq-count (lambda (p) (string= p path)) all-paths) 1)
     "shared by multiple torrents")
    ((seq-some (lambda (p) (and (not (string= p path))
@@ -1745,23 +1756,46 @@ Cached per connection; used to refuse deleting the shared root."
        (funcall callback nil)))))
 
 (defun rtorred--resolve-data-path (hash callback)
-  "Pass HASH's on-disk data path (`d.base_path') to CALLBACK.
-CALLBACK receives the path string, \"\" when rtorrent reports no path,
-or (error . MSG) when the RPC itself failed.  The two empty-ish cases
-are deliberately distinct: \"\" means rtorrent SAID there is no path
-(torrent never opened), while an RPC failure means we don't know --
-conflating them once turned a batch of timeouts into \"erase without
-deleting data\" for seven perfectly healthy seeding torrents.
+  "Pass HASH's on-disk data path to CALLBACK.
+CALLBACK receives one of:
+
+  PATH             a trustworthy torrent-specific path (`d.base_path')
+  (directory . P)  a `d.directory' fallback, needing the extra guard in
+                   `rtorred--rm-unsafe-reason'
+  \"\"               rtorrent reports no path at all
+  (error . MSG)    the RPC itself failed, so we know nothing
+
+Those last two are deliberately distinct: \"\" means rtorrent SAID there
+is no path, while a failure means we don't know -- conflating them once
+turned a batch of timeouts into \"erase without deleting data\" for seven
+healthy seeding torrents.
 
 `d.base_path' is the file for single-file torrents and the torrent's own
-directory for multi-file ones -- always torrent-specific.
+directory for multi-file ones -- always torrent-specific, but rtorrent
+only maintains it for OPEN torrents.  Closing a completed torrent blanks
+it, which used to make every closed torrent undeletable (its data left
+behind as an orphan) even though the data was plainly there.
 
-It deliberately does NOT fall back to `d.directory': for a torrent that
-has never been opened, base_path is empty and `d.directory' is typically
-the *shared* download root, so deleting it would wipe every download."
+So an empty base_path falls back to `d.directory', which for a closed
+torrent still names its own directory.  The fallback is tagged rather
+than returned bare because `d.directory' is NOT always torrent-specific:
+for a torrent that never downloaded anything it is the shared download
+root.  Callers must apply the FROM-DIRECTORY guard, which refuses any
+fallback path that isn't provably inside a known root."
   (rtorred-rpc-async
    "d.base_path" (list hash)
-   (lambda (path) (funcall callback (if (stringp path) path "")))
+   (lambda (path)
+     (if (and (stringp path) (not (string-empty-p path)))
+         (funcall callback path)
+       ;; Empty base_path: closed torrent (or never opened).  Ask where
+       ;; rtorrent thinks its data lives.
+       (rtorred-rpc-async
+        "d.directory" (list hash)
+        (lambda (dir)
+          (funcall callback (if (and (stringp dir) (not (string-empty-p dir)))
+                                (cons 'directory dir)
+                              "")))
+        (lambda (msg) (funcall callback (cons 'error msg))))))
    (lambda (msg) (funcall callback (cons 'error msg)))))
 
 (defun rtorred--erase-one (hash k)
@@ -1804,21 +1838,32 @@ have everything they need."
 
 (defun rtorred--confirm-delete-data (results root buf)
   "Show the exact `rm' commands for RESULTS, ask, then erase.
-RESULTS is a list of (HASH . PATH-OR-ERROR); ROOT is the download root.
-Entries whose path lookup FAILED (see `rtorred--resolve-data-path') are
-not touched at all -- not deleted, not erased -- and stay marked for a
-retry: we don't know their on-disk state, so we do nothing to them.
-Each real path is screened by `rtorred--rm-unsafe-reason'; only paths
-that clear every guard are ever sent to the server.  Torrents whose
-path is legitimately unsafe/absent are still erased, but their data is
-left on disk."
-  (let* ((failed (seq-filter (lambda (r) (consp (cdr r))) results))
-         (ok (seq-remove (lambda (r) (consp (cdr r))) results))
-         (all-paths (mapcar #'cdr ok))
+RESULTS is a list of (HASH . VALUE) as produced by
+`rtorred--resolve-data-path'; ROOT is the download root.
+
+Entries whose path lookup FAILED are not touched at all -- not deleted,
+not erased -- and stay marked for a retry: we don't know their on-disk
+state, so we do nothing to them.  Every other path is screened by
+`rtorred--rm-unsafe-reason' (fallback paths from `d.directory' carry an
+extra guard); only paths that clear every layer are ever sent to the
+server.  Torrents whose path is unsafe or absent are still erased, but
+their data is left on disk."
+  (let* ((failed (seq-filter (lambda (r) (eq (car-safe (cdr r)) 'error)) results))
+         ;; (HASH PATH FROM-DIRECTORY) for everything we can reason about.
+         (entries (mapcar (lambda (r)
+                            (let ((v (cdr r)))
+                              (list (car r)
+                                    (if (consp v) (cdr v) v)
+                                    (eq (car-safe v) 'directory))))
+                          (seq-remove (lambda (r) (eq (car-safe (cdr r)) 'error))
+                                      results)))
+         (all-paths (mapcar #'cadr entries))
+         (hash-of (lambda (e) (nth 0 e)))
          (to-rm nil) (unsafe nil))
-    (dolist (r ok)
-      (let ((reason (rtorred--rm-unsafe-reason (cdr r) root all-paths)))
-        (if reason (push (cons r reason) unsafe) (push r to-rm))))
+    (dolist (e entries)
+      (let ((reason (rtorred--rm-unsafe-reason
+                     (nth 1 e) root all-paths (nth 2 e))))
+        (if reason (push (cons e reason) unsafe) (push e to-rm))))
     (setq to-rm (nreverse to-rm) unsafe (nreverse unsafe))
     (if (null to-rm)
         (progn
@@ -1826,18 +1871,21 @@ left on disk."
            (concat "rtorred: no safely deletable data; erasing %d torrent(s) only"
                    (and failed ", %d path lookup(s) failed and left marked"))
            (length unsafe) (length failed))
-          (rtorred--erase-execute nil (mapcar (lambda (u) (car (car u))) unsafe)
+          (rtorred--erase-execute nil (mapcar (lambda (u) (funcall hash-of (car u)))
+                                              unsafe)
                                   buf (mapcar #'car failed)))
       (with-output-to-temp-buffer "*rtorred-erase*"
         (princ (format "Will run these %d command(s) on the rtorrent host \
 (via %s):\n\n" (length to-rm) (rtorred--execute-method)))
-        (dolist (r to-rm)
-          (princ (format "  rm -rf -- %s\n" (cdr r))))
+        (dolist (e to-rm)
+          (princ (format "  rm -rf -- %s%s\n" (nth 1 e)
+                         (if (nth 2 e) "    [closed torrent: d.directory]" ""))))
         (when unsafe
           (princ (format "\nErased WITHOUT deleting data (%d):\n" (length unsafe)))
           (dolist (u unsafe)
             (princ (format "  %-40s  (%s)\n"
-                           (rtorred--hash-name (car (car u))) (cdr u)))))
+                           (rtorred--hash-name (funcall hash-of (car u)))
+                           (cdr u)))))
         (when failed
           (princ (format "\nNOT TOUCHED -- path lookup failed (%d), left marked \
 for retry:\n" (length failed)))
@@ -1849,11 +1897,13 @@ for retry:\n" (length failed)))
                              (length to-rm)))))
         (quit-windows-on "*rtorred-erase*")
         (if delete
-            (rtorred--erase-execute to-rm (mapcar (lambda (u) (car (car u))) unsafe)
-                                    buf (mapcar #'car failed))
+            (rtorred--erase-execute
+             (mapcar (lambda (e) (cons (nth 0 e) (nth 1 e))) to-rm)
+             (mapcar (lambda (u) (funcall hash-of (car u))) unsafe)
+             buf (mapcar #'car failed))
           ;; Declined: no data deletion anywhere.  Erase the torrents with
           ;; known paths; the failed-lookup ones still stay untouched.
-          (rtorred--erase-execute nil (mapcar #'car ok)
+          (rtorred--erase-execute nil (mapcar hash-of entries)
                                   buf (mapcar #'car failed)))))))
 
 (defun rtorred--erase-execute (to-rm erase-only buf &optional pre-failed)
